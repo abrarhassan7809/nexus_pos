@@ -1,0 +1,4 @@
+# NEXUS POS — Python dependencies
+# Install ONE of the following Qt bindings:
+PySide6>=6.4.0
+# PyQt6>=6.4.0   # uncomment this line and comment PySide6 if preferred
