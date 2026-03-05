@@ -1,48 +1,61 @@
-from PySide6.QtWidgets import QApplication, QDialog
+#!/usr/bin/env python3
+"""
+Nexus POS — Point of Sale System
+Entry point: initializes DB, shows login, launches main window.
+"""
 import sys
-from pathlib import Path
+import os
 
-# ── Make sure the project root is on sys.path so all packages resolve ──
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from database.schema import init_db
+from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import Qt
+
+from database import init_db
 from utils.theme import STYLESHEET
 from views.login import LoginDialog
-from main_window import MainWindow
+from views.main_window import MainWindow
 
 
-# ── Application state ─────────────────────────────────────────────
-_app: QApplication | None = None
-_win: MainWindow | None = None
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Nexus POS")
+    app.setOrganizationName("NexusSoft")
+    app.setStyle("Fusion")
 
+    # Apply global stylesheet
+    app.setStyleSheet(STYLESHEET)
 
-def show_login() -> None:
-    """Display the login dialog; on success open the main window."""
-    global _win
-    dlg = LoginDialog()
-    if dlg.exec() == QDialog.DialogCode.Accepted:
-        _win = MainWindow(dlg.user_data, on_logout=show_login)
-        _win.show()
-    else:
-        if _app:
-            _app.quit()
+    # Set default font
+    font = QFont("Segoe UI", 10)
+    app.setFont(font)
 
-
-def main() -> None:
-    global _app
-    # ── Initialise database (creates file + seeds on first run) ───
+    # Initialize database (creates tables + seed data)
     init_db()
 
-    # ── Qt application ─────────────────────────────────────────────
-    _app = QApplication(sys.argv)
-    _app.setApplicationName("NEXUS POS")
-    _app.setOrganizationName("Nexus")
-    _app.setStyleSheet(STYLESHEET)
+    # Show login dialog
+    while True:
+        login = LoginDialog()
+        if login.exec() != LoginDialog.DialogCode.Accepted:
+            # User closed login — exit app
+            break
 
-    show_login()
-    sys.exit(_app.exec())
+        user = login.get_user()
+        if user is None:
+            break
+
+        # Launch main window
+        window = MainWindow(user)
+        window.show()
+        app.exec()
+
+        # After main window closes, loop back to login
+        # (allows switching accounts without restarting)
+        break  # Remove this break to enable re-login after logout
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":

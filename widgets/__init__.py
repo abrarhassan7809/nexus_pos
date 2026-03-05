@@ -1,16 +1,8 @@
-from .base import (
-    SectionTitle,
-    StatCard,
-    Divider,
-    styled_table,
-)
+from .base import SectionTitle, SectionSubtitle, StatCard, Divider, styled_table, make_table_item
 from .charts import WeeklyBarChart, TopProductsChart
 
 __all__ = [
-    "SectionTitle",
-    "StatCard",
-    "Divider",
-    "styled_table",
-    "WeeklyBarChart",
-    "TopProductsChart",
+    "SectionTitle", "SectionSubtitle", "StatCard", "Divider",
+    "styled_table", "make_table_item",
+    "WeeklyBarChart", "TopProductsChart",
 ]

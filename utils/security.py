@@ -1,11 +1,18 @@
-import hashlib
+import bcrypt
 
 
-def hash_pw(password: str) -> str:
-    """Return SHA-256 hex digest of the given plaintext password."""
-    return hashlib.sha256(password.encode()).hexdigest()
+def hash_pw(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
 
 
-def is_admin(user: dict) -> bool:
-    """Return True if the user dict has the admin role."""
-    return (user or {}).get("role", "") == "admin"
+def verify_pw(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
+    except Exception:
+        return False
+
+
+def is_admin(user_row) -> bool:
+    if user_row is None:
+        return False
+    return user_row["role"] == "admin"

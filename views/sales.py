@@ -1,165 +1,260 @@
-from datetime import datetime
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidgetItem, QMessageBox,
-                               QDialog, QFileDialog, QDateEdit, QHeaderView)
-from PySide6.QtCore import QDate
+from __future__ import annotations
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QFrame, QDialog, QComboBox, QTableWidget, QTableWidgetItem,
+    QMessageBox, QDateEdit, QFileDialog, QHeaderView, QSizePolicy
+)
+from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QColor
-from database.queries import OrderQueries, ReportQueries
-from utils.theme import THEME
-from utils.helpers import export_csv
-from widgets.base import SectionTitle, StatCard, styled_table
-from .pos import ReceiptDialog
+from database import OrderQueries
+from utils import format_currency, short_date, export_csv, today_str
+from utils.theme import THEME as T
+from widgets import styled_table, make_table_item, SectionTitle
+
+
+class OrderDetailDialog(QDialog):
+    def __init__(self, order, items, user, parent=None):
+        super().__init__(parent)
+        self._order = order
+        self._items = items
+        self._user  = user
+        self.setWindowTitle(f"Order — {order['order_no']}")
+        self.setMinimumSize(500, 500)
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # Info grid
+        info = QHBoxLayout()
+        left = QVBoxLayout(); left.setSpacing(4)
+        right = QVBoxLayout(); right.setSpacing(4)
+        for label, val in [("Order:", self._order['order_no']),
+                           ("Date:", short_date(self._order['created_at'])),
+                           ("Cashier:", self._order['username'] or '—'),
+                           ("Method:", self._order['pay_method'].upper())]:
+            row = QHBoxLayout()
+            lbl = QLabel(f"<b>{label}</b>")
+            lbl.setFixedWidth(60)
+            row.addWidget(lbl)
+            row.addWidget(QLabel(val))
+            left.addLayout(row)
+
+        for label, val, color in [
+            ("Status:",   self._order['status'].upper(),              T['success'] if self._order['status']=='completed' else T['danger']),
+            ("Subtotal:", format_currency(self._order['subtotal']),   None),
+            ("Discount:", format_currency(self._order['discount']),   T['warning']),
+            ("Tax:",      format_currency(self._order['tax']),        None),
+            ("TOTAL:",    format_currency(self._order['total']),      T['success']),
+        ]:
+            row = QHBoxLayout()
+            lbl = QLabel(f"<b>{label}</b>")
+            lbl.setFixedWidth(70)
+            val_lbl = QLabel(val)
+            if color:
+                val_lbl.setStyleSheet(f"color: {color}; font-weight: 600;")
+            row.addWidget(lbl)
+            row.addWidget(val_lbl)
+            right.addLayout(row)
+
+        info.addLayout(left)
+        info.addSpacing(20)
+        info.addLayout(right)
+        info.addStretch()
+        layout.addLayout(info)
+
+        # Items table: Product(stretch), Price, Qty, Subtotal fixed
+        tbl = styled_table(["Product", "Unit Price", "Qty", "Subtotal"],
+                           col_widths=[None, 90, 60, 90], stretch_col=0)
+        tbl.setRowCount(len(self._items))
+        RIGHT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        CENTER = Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+        for i, item in enumerate(self._items):
+            tbl.setItem(i, 0, QTableWidgetItem(item['name']))
+            tbl.setItem(i, 1, make_table_item(format_currency(item['price']),  RIGHT))
+            tbl.setItem(i, 2, make_table_item(str(item['qty']),                CENTER))
+            tbl.setItem(i, 3, make_table_item(format_currency(item['subtotal']), RIGHT,
+                                              T['success']))
+        layout.addWidget(tbl)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        if self._order['status'] == 'completed' and self._user['role'] == 'admin':
+            void_btn = QPushButton("Void Order")
+            void_btn.setObjectName("danger")
+            void_btn.clicked.connect(self._void)
+            btn_row.addWidget(void_btn)
+        btn_row.addStretch()
+
+        print_btn = QPushButton("🖨  Print")
+        print_btn.setObjectName("ghost")
+        print_btn.clicked.connect(self._print)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(print_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _void(self):
+        if QMessageBox.question(
+                self, "Void Order",
+                f"Void {self._order['order_no']}?\nStock will be restored.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes:
+            OrderQueries.void_order(self._order['id'], self._user['id'])
+            self.accept()
+
+    def _print(self):
+        from PySide6.QtPrintSupport import QPrinter, QPrintDialog
+        from PySide6.QtGui import QTextDocument
+        printer = QPrinter()
+        dlg = QPrintDialog(printer, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            lines = [
+                f"Order: {self._order['order_no']}",
+                f"Date:  {self._order['created_at'][:19]}",
+                f"{'—'*36}",
+            ]
+            for item in self._items:
+                lines.append(f"{item['name']} x{item['qty']}  {format_currency(item['subtotal'])}")
+            lines += [
+                f"{'—'*36}",
+                f"Total:  {format_currency(self._order['total'])}",
+                f"Paid:   {format_currency(self._order['payment'])}",
+                f"Change: {format_currency(self._order['change_due'])}",
+            ]
+            doc = QTextDocument()
+            doc.setPlainText("\n".join(lines))
+            doc.print_(printer)
 
 
 class SalesTab(QWidget):
-    """Full sales record viewer with filter, stats, and export."""
-
-    def __init__(self, parent=None):
+    def __init__(self, user, parent=None):
         super().__init__(parent)
-        self._rows_cache: list[dict] = []
+        self._user = user
+        self._orders = []
         self._build_ui()
         self.refresh()
 
-    # ── UI ────────────────────────────────────────────────────────
-    def _build_ui(self) -> None:
-        lay = QVBoxLayout(self)
-        lay.setSpacing(8)
-        lay.setContentsMargins(12, 12, 12, 12)
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
 
-        # Header + filters
+        # Header
         hdr = QHBoxLayout()
-        hdr.addWidget(SectionTitle("Sales Records"))
+        hdr.addWidget(SectionTitle("Sales History"))
         hdr.addStretch()
+        layout.addLayout(hdr)
 
-        self._from = QDateEdit(QDate.currentDate().addDays(-30))
-        self._from.setDisplayFormat("yyyy-MM-dd"); self._from.setCalendarPopup(True); self._from.setFixedHeight(34)
+        # Filters
+        filters = QHBoxLayout()
+        filters.setSpacing(8)
+        filters.addWidget(QLabel("From:"))
+        self.date_from = QDateEdit()
+        self.date_from.setCalendarPopup(True)
+        self.date_from.setDate(QDate.currentDate().addDays(-30))
+        self.date_from.setFixedHeight(34)
+        filters.addWidget(self.date_from)
 
-        self._to = QDateEdit(QDate.currentDate())
-        self._to.setDisplayFormat("yyyy-MM-dd"); self._to.setCalendarPopup(True); self._to.setFixedHeight(34)
+        filters.addWidget(QLabel("To:"))
+        self.date_to = QDateEdit()
+        self.date_to.setCalendarPopup(True)
+        self.date_to.setDate(QDate.currentDate())
+        self.date_to.setFixedHeight(34)
+        filters.addWidget(self.date_to)
 
-        flt_btn = QPushButton("🔍  Filter"); flt_btn.setObjectName("accent_btn"); flt_btn.setFixedHeight(34); flt_btn.clicked.connect(self.refresh)
-        exp_btn = QPushButton("📤  Export CSV"); exp_btn.setFixedHeight(34); exp_btn.clicked.connect(self._export)
+        filters.addWidget(QLabel("Status:"))
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["All", "completed", "voided"])
+        self.status_combo.setFixedHeight(34)
+        filters.addWidget(self.status_combo)
 
-        hdr.addWidget(QLabel("From:")); hdr.addWidget(self._from)
-        hdr.addWidget(QLabel("To:"));   hdr.addWidget(self._to)
-        hdr.addWidget(flt_btn); hdr.addWidget(exp_btn)
-        lay.addLayout(hdr)
+        search_btn = QPushButton("Search")
+        search_btn.setObjectName("primary")
+        search_btn.setFixedHeight(34)
+        search_btn.clicked.connect(self.refresh)
+        filters.addWidget(search_btn)
+        filters.addStretch()
 
-        # KPI cards
-        sr = QHBoxLayout()
-        self._c_orders  = StatCard("Orders",       "—", "🧾", THEME["accent"])
-        self._c_revenue = StatCard("Revenue",       "—", "$",  THEME["success"])
-        self._c_profit  = StatCard("Gross Profit",  "—", "📈", THEME["warning"])
-        self._c_avg     = StatCard("Avg Order",     "—", "⌀",  THEME["text_secondary"])
-        for c in [self._c_orders, self._c_revenue, self._c_profit, self._c_avg]:
-            sr.addWidget(c)
-        lay.addLayout(sr)
+        export_btn = QPushButton("📊  Export CSV")
+        export_btn.setObjectName("ghost")
+        export_btn.setFixedHeight(34)
+        export_btn.clicked.connect(self._export)
+        filters.addWidget(export_btn)
+        layout.addLayout(filters)
 
-        # Orders table
-        self._tbl = styled_table(
-            ["Order No", "Date", "Cashier", "Items",
-             "Subtotal", "Discount", "Tax", "Total", "Payment", "Status"]
+        # Summary strip
+        self.summary_lbl = QLabel()
+        self.summary_lbl.setStyleSheet(f"color: {T['text_muted']}; font-size: 12px;")
+        layout.addWidget(self.summary_lbl)
+
+        # Table
+        # Order#=150, Cashier=90, Subtotal=90, Disc=80, Tax=80, Total=90, Method=80, Status=80, Date=stretch
+        self.table = styled_table(
+            ["Order #", "Cashier", "Subtotal", "Discount", "Tax", "Total", "Method", "Status", "Date"],
+            col_widths=[150, 90, 90, 80, 80, 90, 80, 75, None],
+            stretch_col=8
         )
-        self._tbl.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents
+        self.table.cellDoubleClicked.connect(self._open_order)
+        layout.addWidget(self.table)
+
+        hint = QLabel("Double-click a row to view order details.")
+        hint.setStyleSheet(f"color: {T['text_dim']}; font-size: 11px;")
+        layout.addWidget(hint)
+
+    def refresh(self):
+        date_from = self.date_from.date().toString("yyyy-MM-dd")
+        date_to   = self.date_to.date().toString("yyyy-MM-dd")
+        status    = self.status_combo.currentText()
+        status    = None if status == "All" else status
+
+        self._orders = list(OrderQueries.get_all(date_from, date_to, status))
+
+        RIGHT  = Qt.AlignmentFlag.AlignRight  | Qt.AlignmentFlag.AlignVCenter
+        CENTER = Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+
+        self.table.setRowCount(0)
+        self.table.setRowCount(len(self._orders))
+
+        total_rev = 0.0
+        for i, o in enumerate(self._orders):
+            self.table.setItem(i, 0, QTableWidgetItem(o['order_no']))
+            self.table.setItem(i, 1, QTableWidgetItem(o['username'] or '—'))
+            self.table.setItem(i, 2, make_table_item(format_currency(o['subtotal']),  RIGHT))
+            self.table.setItem(i, 3, make_table_item(format_currency(o['discount']),  RIGHT, T['warning']))
+            self.table.setItem(i, 4, make_table_item(format_currency(o['tax']),       RIGHT))
+            self.table.setItem(i, 5, make_table_item(format_currency(o['total']),     RIGHT, T['success']))
+            self.table.setItem(i, 6, make_table_item(o['pay_method'].upper(),         CENTER))
+            status_color = T['success'] if o['status'] == 'completed' else T['danger']
+            self.table.setItem(i, 7, make_table_item(o['status'].upper(), CENTER, status_color))
+            self.table.setItem(i, 8, QTableWidgetItem(short_date(o['created_at'])))
+            if o['status'] == 'completed':
+                total_rev += o['total']
+
+        count = sum(1 for o in self._orders if o['status'] == 'completed')
+        self.summary_lbl.setText(
+            f"Showing {len(self._orders)} orders  ·  "
+            f"Completed: {count}  ·  "
+            f"Revenue: {format_currency(total_rev)}"
         )
-        self._tbl.doubleClicked.connect(self._view_order)
-        lay.addWidget(self._tbl)
 
-        # Row actions
-        br = QHBoxLayout()
-        view_btn = QPushButton("👁  View Receipt"); view_btn.clicked.connect(self._view_order)
-        void_btn = QPushButton("⊗  Void Order"); void_btn.setObjectName("danger_btn"); void_btn.clicked.connect(self._void_order)
-        br.addWidget(view_btn); br.addWidget(void_btn); br.addStretch()
-        lay.addLayout(br)
-
-    # ── Data ──────────────────────────────────────────────────────
-    def refresh(self) -> None:
-        d_from = self._from.date().toString("yyyy-MM-dd")
-        d_to   = self._to.date().toString("yyyy-MM-dd")
-
-        rows = OrderQueries.get_orders(d_from, d_to)
-        completed = [r for r in rows if r["status"] == "completed"]
-        total_rev = sum(r["total"] for r in completed)
-        profit    = ReportQueries.sales_profit(d_from, d_to)["gross_profit"]
-        avg       = total_rev / len(completed) if completed else 0
-
-        self._c_orders.set_value(len(rows))
-        self._c_revenue.set_value(f"${total_rev:,.2f}")
-        self._c_profit.set_value(f"${profit:,.2f}")
-        self._c_avg.set_value(f"${avg:.2f}")
-
-        self._rows_cache = rows
-        self._tbl.setRowCount(0)
-        for r in rows:
-            ri = self._tbl.rowCount()
-            self._tbl.insertRow(ri)
-            cashier = r.get("full_name") or r.get("username") or "—"
-            cells = [
-                r["order_no"], r["created_at"][:16], cashier,
-                str(r["item_count"]),
-                f"${r['subtotal']:.2f}", f"${r['discount']:.2f}",
-                f"${r['tax_amount']:.2f}", f"${r['total']:.2f}",
-                r["payment_type"], r["status"],
-            ]
-            for ci, txt in enumerate(cells):
-                item = QTableWidgetItem(txt)
-                item.setData(0x0100, r)       # Qt.ItemDataRole.UserRole
-                if ci == 9 and r["status"] == "void":
-                    item.setForeground(QColor(THEME["danger"]))
-                self._tbl.setItem(ri, ci, item)
-
-    def _selected(self) -> dict | None:
-        row = self._tbl.currentRow()
-        if row < 0:
-            return None
-        return self._tbl.item(row, 0).data(0x0100)
-
-    # ── Actions ───────────────────────────────────────────────────
-    def _view_order(self) -> None:
-        o = self._selected()
-        if not o:
+    def _open_order(self, row, col):
+        if row >= len(self._orders):
             return
-        items = OrderQueries.get_order_items(o["id"])
-        ReceiptDialog(o, items, self).exec()
+        o = self._orders[row]
+        order, items = OrderQueries.get_by_id(o['id'])
+        dlg = OrderDetailDialog(dict(order), [dict(i) for i in items], self._user, self)
+        dlg.exec()
+        self.refresh()
 
-    def _void_order(self) -> None:
-        o = self._selected()
-        if not o:
-            return
-        if o["status"] == "void":
-            QMessageBox.information(self, "Already Voided",
-                                    "This order is already voided.")
-            return
-        if (QMessageBox.question(
-            self, "Void Order",
-            f"Void order {o['order_no']}?\nThis will restore stock.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes):
-            OrderQueries.void_order(o["id"])
-            self.refresh()
-
-    def _export(self) -> None:
+    def _export(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Sales CSV",
-            f"sales_{datetime.now().strftime('%Y%m%d')}.csv",
-            "CSV Files (*.csv)",
-        )
-        if not path:
-            return
-        headers = [
-            "Order No", "Date", "Cashier", "Items", "Subtotal",
-            "Discount", "Tax", "Total", "Payment", "Status",
-        ]
-        data_rows = [
-            [
-                r["order_no"], r["created_at"][:16],
-                r.get("username") or "",
-                r["item_count"],
-                f"{r['subtotal']:.2f}", f"{r['discount']:.2f}",
-                f"{r['tax_amount']:.2f}", f"{r['total']:.2f}",
-                r["payment_type"], r["status"],
-            ]
-            for r in self._rows_cache
-        ]
-        export_csv(path, headers, data_rows)
-        QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
+            self, "Export CSV", f"sales_{today_str()}.csv", "CSV Files (*.csv)")
+        if path and self._orders:
+            headers = ["order_no", "username", "subtotal", "discount", "tax",
+                       "total", "pay_method", "status", "created_at"]
+            export_csv(self._orders, headers, path)
+            QMessageBox.information(self, "Exported", f"Saved to:\n{path}")

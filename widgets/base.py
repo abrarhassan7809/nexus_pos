@@ -1,103 +1,132 @@
-from PySide6.QtWidgets import (QLabel, QFrame, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView)
+from __future__ import annotations
+from PySide6.QtWidgets import (
+    QLabel, QFrame, QHBoxLayout, QVBoxLayout, QTableWidget,
+    QTableWidgetItem, QHeaderView, QWidget, QSizePolicy, QAbstractItemView
+)
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QColor
-from utils.theme import THEME
+from PySide6.QtGui import QColor, QFont
+from utils.theme import THEME as T
 
 
-# ── Section Title ─────────────────────────────────────────────────
 class SectionTitle(QLabel):
-    """Bold page-level heading."""
-
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
-        self.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        self.setStyleSheet(f"color: {THEME['text_primary']}; padding: 4px 0;")
+        self.setObjectName("title")
+        font = QFont()
+        font.setPointSize(16)
+        font.setWeight(QFont.Weight.Bold)
+        self.setFont(font)
 
 
-# ── KPI Stat Card ─────────────────────────────────────────────────
-class StatCard(QFrame):
-    """
-    A styled card displaying an icon, a big value label, and a title label.
-
-    Usage::
-
-        card = StatCard("Revenue Today", "$0.00", icon="$", color=THEME["success"])
-        card.set_value("$1,234.56")
-    """
-
-    def __init__(self, title: str, value: str = "—",
-                 icon: str = "●", color: str | None = None, parent=None):
-        super().__init__(parent)
-        color = color or THEME["accent"]
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setStyleSheet(f"""
-            QFrame {{
-                background: {THEME['bg_card']};
-                border: 1px solid {THEME['border']};
-                border-left: 4px solid {color};
-                border-radius: 8px;
-                padding: 8px;
-            }}
-        """)
-        lay = QVBoxLayout(self)
-        lay.setSpacing(4)
-
-        # Icon row
-        top = QHBoxLayout()
-        ico_lbl = QLabel(icon)
-        ico_lbl.setFont(QFont("Segoe UI", 20))
-        ico_lbl.setStyleSheet(f"color: {color}; background: transparent;")
-        top.addWidget(ico_lbl)
-        top.addStretch()
-        lay.addLayout(top)
-
-        # Value
-        self._val_lbl = QLabel(str(value))
-        self._val_lbl.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
-        self._val_lbl.setStyleSheet(
-            f"color: {THEME['text_primary']}; background: transparent;"
-        )
-        lay.addWidget(self._val_lbl)
-
-        # Title
-        title_lbl = QLabel(title.upper())
-        title_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        title_lbl.setStyleSheet(
-            f"color: {THEME['text_secondary']}; letter-spacing: 1px; background: transparent;"
-        )
-        lay.addWidget(title_lbl)
-
-    def set_value(self, value) -> None:
-        """Update the displayed value."""
-        self._val_lbl.setText(str(value))
+class SectionSubtitle(QLabel):
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("subtitle")
 
 
-# ── Horizontal Divider ────────────────────────────────────────────
 class Divider(QFrame):
-    """Thin horizontal separator line."""
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.HLine)
-        self.setStyleSheet(
-            f"color: {THEME['border']}; background: {THEME['border']}; max-height: 1px;"
+        self.setStyleSheet(f"color: {T['border']}; background: {T['border']};")
+        self.setFixedHeight(1)
+
+
+class StatCard(QFrame):
+    def __init__(self, title: str, value: str = "—", color: str = None,
+                 icon: str = "", parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.setMinimumWidth(120)
+        self.setMinimumHeight(90)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(4)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(6)
+        if icon:
+            icon_lbl = QLabel(icon)
+            icon_lbl.setStyleSheet(f"font-size: 16px; color: {color or T['accent']};")
+            icon_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            top_row.addWidget(icon_lbl)
+        title_lbl = QLabel(title.upper())
+        title_lbl.setObjectName("section")
+        title_lbl.setWordWrap(True)
+        top_row.addWidget(title_lbl)
+        top_row.addStretch()
+        layout.addLayout(top_row)
+
+        self.value_label = QLabel(value)
+        self.value_label.setStyleSheet(
+            f"font-size: 22px; font-weight: 700; color: {color or T['text']};"
         )
+        self.value_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.value_label)
+
+        if color:
+            accent_bar = QFrame()
+            accent_bar.setFixedHeight(3)
+            accent_bar.setStyleSheet(f"background: {color}; border-radius: 2px;")
+            layout.addWidget(accent_bar)
+
+    def set_value(self, v: str):
+        self.value_label.setText(v)
 
 
-# ── Table Factory ─────────────────────────────────────────────────
-def styled_table(columns: list[str]) -> QTableWidget:
+def styled_table(columns: list[str], col_widths: list[int] | None = None,
+                 stretch_col: int = -1) -> QTableWidget:
     """
-    Return a QTableWidget pre-configured with the app's visual style.
-
-    Args:
-        columns: list of column header labels.
+    col_widths : pixel width for each column (Fixed mode); None columns use ResizeToContents.
+    stretch_col: column index that fills remaining space (-1 = last column).
     """
-    table = QTableWidget(0, len(columns))
-    table.setHorizontalHeaderLabels(columns)
-    table.horizontalHeader().setStretchLastSection(True)
-    table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-    table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-    table.setAlternatingRowColors(True)
-    table.verticalHeader().setVisible(False)
-    table.setShowGrid(True)
-    return table
+    tbl = QTableWidget()
+    tbl.setColumnCount(len(columns))
+    tbl.setHorizontalHeaderLabels(columns)
+
+    tbl.verticalHeader().setVisible(False)
+    tbl.verticalHeader().setDefaultSectionSize(50)
+    tbl.verticalHeader().setMinimumSectionSize(32)
+
+    tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    tbl.setAlternatingRowColors(True)
+    tbl.setShowGrid(True)
+    tbl.setWordWrap(False)
+    tbl.setStyleSheet(
+        f"QTableWidget {{ alternate-background-color: {T['surface2']}; "
+        f"background-color: {T['surface']}; }}"
+    )
+
+    hdr = tbl.horizontalHeader()
+    hdr.setHighlightSections(False)
+    hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    n = len(columns)
+    actual_stretch = stretch_col if stretch_col >= 0 else n - 1
+
+    for i in range(n):
+        if i == actual_stretch:
+            hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
+        elif col_widths and i < len(col_widths) and col_widths[i] is not None:
+            hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+            tbl.setColumnWidth(i, col_widths[i])
+        else:
+            hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+
+    tbl.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    tbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+    return tbl
+
+
+def make_table_item(text: str,
+                    align: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    color: str = None) -> QTableWidgetItem:
+    item = QTableWidgetItem(str(text))
+    item.setTextAlignment(align)
+    if color:
+        item.setForeground(QColor(color))
+    return item

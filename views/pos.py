@@ -1,762 +1,638 @@
-from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QLabel, QLineEdit, QComboBox, QSpinBox,
-                               QDoubleSpinBox, QPushButton, QTableWidgetItem, QMessageBox, QDialog, QFormLayout,
-                               QTextEdit, QFileDialog, QGridLayout, QFrame)
+from __future__ import annotations
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QFrame, QTableWidget, QTableWidgetItem,
+    QDialog, QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox,
+    QHeaderView, QMessageBox, QScrollArea, QSplitter,
+    QGridLayout, QSizePolicy, QAbstractItemView
+)
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QTextDocument
-from PySide6.QtPrintSupport import QPrinter, QPrintDialog
-import datetime
-from database.queries import ProductQueries, OrderQueries
-from utils.theme import THEME
-from utils.helpers import next_order_no
-from widgets.base import Divider, styled_table
-from PySide6.QtGui import QFont as _F
 from PySide6.QtGui import QColor
+from database import ProductQueries, OrderQueries
+from utils import next_order_no, format_currency, now_str
+from utils.theme import THEME as T
+from widgets import make_table_item
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  POS TAB
-# ═══════════════════════════════════════════════════════════════════
-class PosTab(QWidget):
-    """
-    Main POS tab.
-    Left  → product browser.
-    Right → TOP: cart orders table + action buttons (stretches).
-            BOTTOM: totals + payment side-by-side + process button (fixed).
-    """
-
-    order_saved = Signal()
-
-    def __init__(self, current_user: dict, parent=None):
-        super().__init__(parent)
-        self.current_user = current_user
-        self.cart: list[dict] = []
-        self._order_no = ""
-        self._build_ui()
-        self._load_products()
-
-    # ─────────────────────────────────────────────────────────────
-    #  TOP-LEVEL LAYOUT
-    # ─────────────────────────────────────────────────────────────
-    def _build_ui(self) -> None:
-        root = QHBoxLayout(self)
-        root.setSpacing(12)
-        root.setContentsMargins(12, 12, 12, 12)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_product_panel())
-        splitter.addWidget(self._build_order_panel())
-        splitter.setSizes([620, 500])
-        root.addWidget(splitter)
-        self._new_order_no()
-
-    # ─────────────────────────────────────────────────────────────
-    #  LEFT — PRODUCT BROWSER
-    # ─────────────────────────────────────────────────────────────
-    def _build_product_panel(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setSpacing(8)
-        lay.setContentsMargins(0, 0, 0, 0)
-
-        # Search + category filter
-        filter_row = QHBoxLayout()
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  Search product or scan barcode…")
-        self._search.setFixedHeight(38)
-        self._search.textChanged.connect(self._filter_products)
-
-        self._cat_combo = QComboBox()
-        self._cat_combo.setFixedHeight(38)
-        self._cat_combo.setFixedWidth(160)
-        self._cat_combo.currentIndexChanged.connect(self._filter_products)
-
-        filter_row.addWidget(self._search)
-        filter_row.addWidget(self._cat_combo)
-        lay.addLayout(filter_row)
-
-        # Product table
-        self._prod_tbl = styled_table(
-            ["ID", "Product", "Category", "Price", "Stock", "Unit"]
-        )
-        self._prod_tbl.setColumnWidth(0,  40)
-        self._prod_tbl.setColumnWidth(1, 180)
-        self._prod_tbl.setColumnWidth(2, 110)
-        self._prod_tbl.setColumnWidth(3,  75)
-        self._prod_tbl.setColumnWidth(4,  60)
-        self._prod_tbl.setColumnWidth(5,  50)
-        self._prod_tbl.doubleClicked.connect(self._add_to_cart)
-        lay.addWidget(self._prod_tbl, stretch=1)
-
-        # Qty + Add button
-        btn_row = QHBoxLayout()
-        qty_lbl = QLabel("Qty:")
-        qty_lbl.setStyleSheet("background: transparent;")
-        self._qty_spin = QSpinBox()
-        self._qty_spin.setRange(1, 9999)
-        self._qty_spin.setValue(1)
-        self._qty_spin.setFixedHeight(36)
-        self._qty_spin.setFixedWidth(80)
-
-        add_btn = QPushButton("＋  Add to Order")
-        add_btn.setObjectName("accent_btn")
-        add_btn.setFixedHeight(36)
-        add_btn.clicked.connect(self._add_to_cart)
-
-        btn_row.addWidget(qty_lbl)
-        btn_row.addWidget(self._qty_spin)
-        btn_row.addSpacing(8)
-        btn_row.addWidget(add_btn)
-        btn_row.addStretch()
-        lay.addLayout(btn_row)
-        return w
-
-    # ─────────────────────────────────────────────────────────────
-    #  RIGHT — ORDER PANEL
-    # ─────────────────────────────────────────────────────────────
-    def _build_order_panel(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setSpacing(0)
-        lay.setContentsMargins(0, 0, 0, 0)
-
-        # Cart section stretches to fill space
-        lay.addWidget(self._build_cart_section(), stretch=1)
-        # Summary + payment is fixed at bottom
-        lay.addWidget(self._build_bottom_section())
-        return w
-
-    # ── CART SECTION (top, stretching) ────────────────────────────
-    def _build_cart_section(self) -> QFrame:
-        frame = QFrame()
-        frame.setStyleSheet(f"""
-            QFrame {{
-                background: {THEME['bg_panel']};
-                border: 1px solid {THEME['border']};
-                border-bottom: none;
-                border-radius: 8px 8px 0 0;
-            }}
-        """)
-        lay = QVBoxLayout(frame)
-        lay.setSpacing(6)
-        lay.setContentsMargins(10, 10, 10, 8)
-
-        # ── Header: title | items badge | order number ────────────
-        hdr = QHBoxLayout()
-
-        ttl = QLabel("🛒  Current Order")
-        ttl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        ttl.setStyleSheet(
-            f"color: {THEME['accent']}; background: transparent; border: none;"
-        )
-
-        self._items_badge = QLabel("0 items")
-        self._items_badge.setStyleSheet(f"""
-            background: {THEME['bg_input']};
-            color: {THEME['text_secondary']};
-            border: 1px solid {THEME['border']};
-            border-radius: 10px;
-            padding: 2px 10px;
-            font-size: 11px;
-            font-weight: 600;
-        """)
-
-        self._ono_lbl = QLabel("")
-        self._ono_lbl.setStyleSheet(
-            f"color: {THEME['text_muted']}; background: transparent; "
-            f"font-size: 11px; border: none;"
-        )
-
-        hdr.addWidget(ttl)
-        hdr.addSpacing(8)
-        hdr.addWidget(self._items_badge)
-        hdr.addStretch()
-        hdr.addWidget(self._ono_lbl)
-        lay.addLayout(hdr)
-
-        lay.addWidget(Divider())
-
-        # ── Cart table ────────────────────────────────────────────
-        self._cart_tbl = styled_table(
-            ["#", "Product", "Unit Price", "Qty", "Disc %", "Subtotal"]
-        )
-        self._cart_tbl.setColumnWidth(0,  32)
-        self._cart_tbl.setColumnWidth(1, 200)
-        self._cart_tbl.setColumnWidth(2,  85)
-        self._cart_tbl.setColumnWidth(3,  55)
-        self._cart_tbl.setColumnWidth(4,  58)
-        self._cart_tbl.setMinimumHeight(180)
-        self._cart_tbl.setStyleSheet(
-            "QTableWidget { border: none; border-radius: 0; background: transparent; }"
-        )
-        lay.addWidget(self._cart_tbl, stretch=1)
-
-        lay.addWidget(Divider())
-
-        # ── Cart action buttons ───────────────────────────────────
-        cab = QHBoxLayout()
-        cab.setSpacing(6)
-
-        edit_btn = QPushButton("✏  Edit Item")
-        edit_btn.setFixedHeight(30)
-        edit_btn.clicked.connect(self._edit_item)
-
-        remove_btn = QPushButton("🗑  Remove")
-        remove_btn.setObjectName("danger_btn")
-        remove_btn.setFixedHeight(30)
-        remove_btn.clicked.connect(self._remove_item)
-
-        clear_btn = QPushButton("✖  Clear All")
-        clear_btn.setFixedHeight(30)
-        clear_btn.clicked.connect(self._clear_cart)
-
-        cab.addWidget(edit_btn)
-        cab.addWidget(remove_btn)
-        cab.addWidget(clear_btn)
-        cab.addStretch()
-        lay.addLayout(cab)
-
-        return frame
-
-    # ── BOTTOM SECTION (fixed height, two columns + process btn) ──
-    def _build_bottom_section(self) -> QFrame:
-        frame = QFrame()
-        frame.setStyleSheet(f"""
-            QFrame {{
-                background: {THEME['bg_card']};
-                border: 1px solid {THEME['border']};
-                border-top: 2px solid {THEME['accent']};
-                border-radius: 0 0 8px 8px;
-            }}
-        """)
-        outer = QVBoxLayout(frame)
-        outer.setContentsMargins(12, 10, 12, 10)
-        outer.setSpacing(8)
-
-        # Two-column row: Totals | divider | Payment
-        cols = QHBoxLayout()
-        cols.setSpacing(14)
-        cols.addWidget(self._build_totals_col(), stretch=1)
-        cols.addWidget(_vline())
-        cols.addWidget(self._build_payment_col(), stretch=1)
-        outer.addLayout(cols)
-
-        outer.addWidget(Divider())
-
-        # Full-width process button
-        proc_btn = QPushButton("  PROCESS ORDER  →")
-        proc_btn.setObjectName("accent_btn")
-        proc_btn.setFixedHeight(46)
-        proc_btn.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-        proc_btn.clicked.connect(self._process_order)
-        outer.addWidget(proc_btn)
-
-        return frame
-
-    # ── TOTALS COLUMN ─────────────────────────────────────────────
-    def _build_totals_col(self) -> QWidget:
-        w = QWidget()
-        w.setStyleSheet("background: transparent;")
-        g = QGridLayout(w)
-        g.setSpacing(5)
-        g.setContentsMargins(0, 0, 0, 0)
-        g.setColumnStretch(1, 1)
-
-        def _lbl(text, bold=False, color=None):
-            l = QLabel(text)
-            c = color or THEME["text_secondary"]
-            s = f"color: {c}; background: transparent;"
-            if bold:
-                s += " font-weight: 700;"
-            l.setStyleSheet(s)
-            return l
-
-        def _val(attr, color=None, big=False):
-            l = QLabel("$0.00")
-            c = color or THEME["text_primary"]
-            s = f"color: {c}; background: transparent; font-weight: 700;"
-            if big:
-                s += " font-size: 18px;"
-            l.setStyleSheet(s)
-            l.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            setattr(self, attr, l)
-            return l
-
-        def _spin(attr, default=0.0):
-            s = QDoubleSpinBox()
-            s.setRange(0, 100)
-            s.setSuffix(" %")
-            s.setValue(default)
-            s.setFixedHeight(28)
-            s.setFixedWidth(88)
-            s.valueChanged.connect(self._recalc)
-            setattr(self, attr, s)
-            return s
-
-        g.addWidget(_lbl("Items"),            0, 0)
-        g.addWidget(_val("_lbl_items"),        0, 1)
-        g.addWidget(_lbl("Subtotal"),          1, 0)
-        g.addWidget(_val("_lbl_subtotal"),     1, 1)
-        g.addWidget(_lbl("Discount"),          2, 0)
-        g.addWidget(_spin("_disc_spin", 0.0),  2, 1, Qt.AlignmentFlag.AlignRight)
-        g.addWidget(_lbl("Tax Rate"),          3, 0)
-        g.addWidget(_spin("_tax_spin", 8.0),   3, 1, Qt.AlignmentFlag.AlignRight)
-        g.addWidget(_lbl("Tax Amount"),        4, 0)
-        g.addWidget(_val("_lbl_tax"),          4, 1)
-
-        sep = Divider()
-        g.addWidget(sep, 5, 0, 1, 2)
-
-        total_head = _lbl("TOTAL", bold=True, color=THEME["accent"])
-        total_head.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        g.addWidget(total_head, 6, 0)
-        g.addWidget(_val("_lbl_total", color=THEME["accent"], big=True), 6, 1)
-
-        return w
-
-    # ── PAYMENT COLUMN ────────────────────────────────────────────
-    def _build_payment_col(self) -> QWidget:
-        w = QWidget()
-        w.setStyleSheet("background: transparent;")
-        g = QGridLayout(w)
-        g.setSpacing(6)
-        g.setContentsMargins(0, 0, 0, 0)
-        g.setColumnStretch(1, 1)
-
-        def _lbl(text):
-            l = QLabel(text)
-            l.setStyleSheet(f"color: {THEME['text_secondary']}; background: transparent;")
-            return l
-
-        # Payment type
-        g.addWidget(_lbl("Payment"), 0, 0)
-        self._pay_type = QComboBox()
-        self._pay_type.addItems(["Cash", "Card", "E-Wallet", "Mixed"])
-        self._pay_type.setFixedHeight(30)
-        g.addWidget(self._pay_type, 0, 1)
-
-        # Amount paid
-        g.addWidget(_lbl("Amount Paid"), 1, 0)
-        self._paid_spin = QDoubleSpinBox()
-        self._paid_spin.setRange(0, 999999)
-        self._paid_spin.setPrefix("$ ")
-        self._paid_spin.setDecimals(2)
-        self._paid_spin.setFixedHeight(30)
-        self._paid_spin.valueChanged.connect(self._recalc_change)
-        g.addWidget(self._paid_spin, 1, 1)
-
-        # Change
-        g.addWidget(_lbl("Change"), 2, 0)
-        self._lbl_change = QLabel("$ 0.00")
-        self._lbl_change.setStyleSheet(
-            f"color: {THEME['success']}; font-weight: 700; "
-            f"font-size: 15px; background: transparent;"
-        )
-        self._lbl_change.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        g.addWidget(self._lbl_change, 2, 1)
-
-        # Note
-        g.addWidget(_lbl("Note"), 3, 0)
-        self._note_input = QLineEdit()
-        self._note_input.setPlaceholderText("Order note (optional)")
-        self._note_input.setFixedHeight(30)
-        g.addWidget(self._note_input, 3, 1)
-
-        return w
-
-    # ─────────────────────────────────────────────────────────────
-    #  HELPERS
-    # ─────────────────────────────────────────────────────────────
-    def _new_order_no(self) -> None:
-        self._order_no = next_order_no()
-        self._ono_lbl.setText(self._order_no)
-
-    def _load_products(self) -> None:
-        self._cat_combo.blockSignals(True)
-        self._cat_combo.clear()
-        self._cat_combo.addItem("All Categories", 0)
-        for cat in ProductQueries.get_categories():
-            self._cat_combo.addItem(cat["name"], cat["id"])
-        self._cat_combo.blockSignals(False)
-        self._filter_products()
-
-    def _filter_products(self) -> None:
-        q      = self._search.text().strip()
-        cat_id = self._cat_combo.currentData()
-        rows   = ProductQueries.get_all(search=q, category_id=cat_id or 0)
-
-        self._prod_tbl.setRowCount(0)
-        for r in rows:
-            ri = self._prod_tbl.rowCount()
-            self._prod_tbl.insertRow(ri)
-            cells = [
-                str(r["id"]), r["name"], r["cat_name"] or "",
-                f"${r['price']:.2f}", str(r["stock"]), r["unit"],
-            ]
-            for ci, txt in enumerate(cells):
-                item = QTableWidgetItem(txt)
-                item.setData(Qt.ItemDataRole.UserRole, r)
-                if ci == 4:
-                    if r["stock"] == 0:
-                        item.setForeground(QColor(THEME["danger"]))
-                    elif r["stock"] <= r["low_stock"]:
-                        item.setForeground(QColor(THEME["warning"]))
-                self._prod_tbl.setItem(ri, ci, item)
-
-    # ─────────────────────────────────────────────────────────────
-    #  CART OPERATIONS
-    # ─────────────────────────────────────────────────────────────
-    def _add_to_cart(self) -> None:
-        row = self._prod_tbl.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Select Product",
-                                    "Please select a product first.")
-            return
-        pdata = self._prod_tbl.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        qty   = self._qty_spin.value()
-
-        if pdata["stock"] < qty:
-            QMessageBox.warning(self, "Low Stock",
-                                f"Only {pdata['stock']} {pdata['unit']} in stock.")
-            return
-
-        # Merge with existing cart line
-        for item in self.cart:
-            if item["id"] == pdata["id"]:
-                new_qty = item["qty"] + qty
-                if pdata["stock"] < new_qty:
-                    QMessageBox.warning(self, "Low Stock",
-                                        f"Max available: {pdata['stock']}.")
-                    return
-                item["qty"] = new_qty
-                item["subtotal"] = round(
-                    item["price"] * item["qty"] * (1 - item["disc"] / 100), 2
-                )
-                self._refresh_cart()
-                return
-
-        self.cart.append({
-            "id":       pdata["id"],
-            "name":     pdata["name"],
-            "unit":     pdata["unit"],
-            "price":    pdata["price"],
-            "qty":      qty,
-            "disc":     0.0,
-            "subtotal": round(pdata["price"] * qty, 2),
-        })
-        self._refresh_cart()
-
-    def _refresh_cart(self) -> None:
-        self._cart_tbl.setRowCount(0)
-        for i, item in enumerate(self.cart):
-            ri = self._cart_tbl.rowCount()
-            self._cart_tbl.insertRow(ri)
-            cells = [
-                str(i + 1),
-                item["name"],
-                f"${item['price']:.2f}",
-                str(item["qty"]),
-                f"{item['disc']:.0f}%",
-                f"${item['subtotal']:.2f}",
-            ]
-            for ci, txt in enumerate(cells):
-                self._cart_tbl.setItem(ri, ci, QTableWidgetItem(txt))
-
-        # Update badge
-        n = sum(i["qty"] for i in self.cart)
-        self._items_badge.setText(f"{n} item{'s' if n != 1 else ''}")
-        self._recalc()
-
-    def _edit_item(self) -> None:
-        row = self._cart_tbl.currentRow()
-        if row < 0:
-            return
-        item = self.cart[row]
-        dlg = EditCartItemDialog(item, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            item["qty"]      = dlg.qty
-            item["disc"]     = dlg.disc
-            item["subtotal"] = round(
-                item["price"] * item["qty"] * (1 - item["disc"] / 100), 2
-            )
-            self._refresh_cart()
-
-    def _remove_item(self) -> None:
-        row = self._cart_tbl.currentRow()
-        if row < 0:
-            return
-        del self.cart[row]
-        self._refresh_cart()
-
-    def _clear_cart(self) -> None:
-        if not self.cart:
-            return
-        if (QMessageBox.question(
-            self, "Clear Order", "Remove all items from the order?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) == QMessageBox.StandardButton.Yes):
-            self.cart.clear()
-            self._refresh_cart()
-
-    # ─────────────────────────────────────────────────────────────
-    #  TOTALS CALCULATION
-    # ─────────────────────────────────────────────────────────────
-    def _recalc(self) -> None:
-        subtotal = sum(i["subtotal"] for i in self.cart)
-        disc_pct = self._disc_spin.value()
-        disc_amt = subtotal * disc_pct / 100
-        after    = subtotal - disc_amt
-        tax_rate = self._tax_spin.value()
-        tax_amt  = after * tax_rate / 100
-        total    = after + tax_amt
-
-        self._lbl_items.setText(str(sum(i["qty"] for i in self.cart)))
-        self._lbl_subtotal.setText(f"${subtotal:.2f}")
-        self._lbl_tax.setText(f"${tax_amt:.2f}")
-        self._lbl_total.setText(f"${total:.2f}")
-        self._paid_spin.setMinimum(total)
-        self._recalc_change()
-
-    def _recalc_change(self) -> None:
-        try:
-            total = float(self._lbl_total.text().replace("$", "").strip())
-        except ValueError:
-            total = 0.0
-        change = max(0.0, self._paid_spin.value() - total)
-        self._lbl_change.setText(f"$ {change:.2f}")
-
-    # ─────────────────────────────────────────────────────────────
-    #  PROCESS ORDER
-    # ─────────────────────────────────────────────────────────────
-    def _process_order(self) -> None:
-        if not self.cart:
-            QMessageBox.warning(self, "Empty Order",
-                                "Add at least one item before processing.")
-            return
-
-        try:
-            total = float(self._lbl_total.text().replace("$", "").strip())
-        except ValueError:
-            total = 0.0
-
-        paid = self._paid_spin.value()
-        if paid < total:
-            QMessageBox.warning(
-                self, "Insufficient Payment",
-                f"Amount paid (${paid:.2f}) is less than total (${total:.2f}).",
-            )
-            return
-
-        subtotal = sum(i["subtotal"] for i in self.cart)
-        disc_pct = self._disc_spin.value()
-        disc_amt = subtotal * disc_pct / 100
-        tax_rate = self._tax_spin.value()
-        tax_amt  = (subtotal - disc_amt) * tax_rate / 100
-        change   = paid - total
-
-        order_data = {
-            "order_no":     self._order_no,
-            "cashier_id":   self.current_user["id"],
-            "subtotal":     subtotal,
-            "discount":     disc_amt,
-            "tax_rate":     tax_rate,
-            "tax_amount":   tax_amt,
-            "total":        total,
-            "paid":         paid,
-            "change":       change,
-            "payment_type": self._pay_type.currentText(),
-            "note":         self._note_input.text(),
-        }
-        try:
-            order_id = OrderQueries.save_order(order_data, self.cart)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save order:\n{e}")
-            return
-
-        self.order_saved.emit()
-
-        order_row  = OrderQueries.get_order(order_id)
-        items_rows = OrderQueries.get_order_items(order_id)
-        ReceiptDialog(order_row, items_rows, self).exec()
-
-        # Reset for next order
-        self.cart.clear()
-        self._refresh_cart()
-        self._disc_spin.setValue(0)
-        self._paid_spin.setValue(0)
-        self._note_input.clear()
-        self._new_order_no()
-        self._filter_products()
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  VERTICAL LINE HELPER
-# ═══════════════════════════════════════════════════════════════════
-def _vline() -> QFrame:
-    f = QFrame()
-    f.setFrameShape(QFrame.Shape.VLine)
-    f.setFixedWidth(1)
-    f.setStyleSheet(f"background: {THEME['border']}; border: none; max-width: 1px;")
-    return f
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  EDIT CART ITEM DIALOG
-# ═══════════════════════════════════════════════════════════════════
+# ─── Edit Cart Item Dialog ─────────────────────────────────────────────────────
 class EditCartItemDialog(QDialog):
     def __init__(self, item: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Edit Cart Item")
-        self.setFixedSize(340, 220)
-        self.qty  = item["qty"]
-        self.disc = item["disc"]
-        self._build(item)
+        self.setWindowTitle("Edit Item")
+        self.setFixedSize(320, 200)
+        self._item = item
+        self._build()
 
-    def _build(self, item: dict) -> None:
-        lay = QVBoxLayout(self)
-        lay.setSpacing(12)
-        lay.setContentsMargins(20, 20, 20, 20)
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+        layout.addWidget(QLabel(f"<b>{self._item['name']}</b>"))
 
-        name_lbl = QLabel(f"<b>{item['name']}</b>")
-        name_lbl.setStyleSheet(
-            f"font-size: 14px; color: {THEME['text_primary']}; background: transparent;"
-        )
-        price_lbl = QLabel(f"Unit price: ${item['price']:.2f} / {item['unit']}")
-        price_lbl.setStyleSheet(
-            f"color: {THEME['text_secondary']}; background: transparent;"
-        )
-        lay.addWidget(name_lbl)
-        lay.addWidget(price_lbl)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.qty_spin = QSpinBox()
+        self.qty_spin.setRange(1, 9999)
+        self.qty_spin.setValue(self._item['qty'])
+        form.addRow("Quantity:", self.qty_spin)
 
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Quantity:"))
-        self._qty = QSpinBox()
-        self._qty.setRange(1, 9999)
-        self._qty.setValue(item["qty"])
-        self._qty.setFixedHeight(32)
-        r1.addWidget(self._qty)
-        lay.addLayout(r1)
-
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("Discount %:"))
-        self._disc = QDoubleSpinBox()
-        self._disc.setRange(0, 100)
-        self._disc.setSuffix(" %")
-        self._disc.setValue(item["disc"])
-        self._disc.setFixedHeight(32)
-        r2.addWidget(self._disc)
-        lay.addLayout(r2)
+        self.price_spin = QDoubleSpinBox()
+        self.price_spin.setRange(0, 999999)
+        self.price_spin.setDecimals(2)
+        self.price_spin.setValue(self._item['price'])
+        form.addRow("Unit Price:", self.price_spin)
+        layout.addLayout(form)
 
         btns = QHBoxLayout()
-        ok     = QPushButton("Apply");  ok.setObjectName("accent_btn"); ok.clicked.connect(self._ok)
-        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
+        ok = QPushButton("Update")
+        ok.setObjectName("primary")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
         btns.addStretch()
         btns.addWidget(cancel)
         btns.addWidget(ok)
-        lay.addLayout(btns)
+        layout.addLayout(btns)
 
-    def _ok(self) -> None:
-        self.qty  = self._qty.value()
-        self.disc = self._disc.value()
-        self.accept()
+    def get_values(self):
+        return self.qty_spin.value(), self.price_spin.value()
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  RECEIPT DIALOG
-# ═══════════════════════════════════════════════════════════════════
+# ─── Receipt Dialog ────────────────────────────────────────────────────────────
 class ReceiptDialog(QDialog):
-    def __init__(self, order: dict, items: list[dict], parent=None):
+    def __init__(self, order_data: dict, items: list, parent=None):
         super().__init__(parent)
-        self.order = order
-        self.items = items
-        self.setWindowTitle("Receipt")
-        self.setFixedSize(480, 620)
+        self.setWindowTitle(f"Receipt — {order_data['order_no']}")
+        self.setMinimumSize(420, 560)
+        self._order = order_data
+        self._items = items
         self._build()
 
-    def _build(self) -> None:
-        lay = QVBoxLayout(self)
-        self._txt = QTextEdit()
-        self._txt.setReadOnly(True)
-        self._txt.setFont(QFont("Courier New", 11))
-        self._txt.setHtml(self._html())
-        lay.addWidget(self._txt)
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        btns = QHBoxLayout()
-        pb = QPushButton("🖨  Print");        pb.setObjectName("accent_btn"); pb.clicked.connect(self._print)
-        sb = QPushButton("💾  Save as Text"); sb.clicked.connect(self._save)
-        cb = QPushButton("✓  Close");         cb.setObjectName("success_btn"); cb.clicked.connect(self.accept)
-        btns.addWidget(pb)
-        btns.addWidget(sb)
-        btns.addStretch()
-        btns.addWidget(cb)
-        lay.addLayout(btns)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
 
-    def _html(self) -> str:
-        o = self.order
-        items_html = ""
-        for it in self.items:
-            disc_str = f" (-{it['discount']:.0f}%)" if it["discount"] else ""
-            items_html += (
-                f"<tr><td>{it['product_name'][:22]}</td>"
-                f"<td align='center'>{it['qty']}</td>"
-                f"<td align='right'>${it['price']:.2f}{disc_str}</td>"
-                f"<td align='right'>${it['subtotal']:.2f}</td></tr>"
-            )
-        return f"""<html><body style='font-family:Courier New;font-size:12px;
-                background:#1C2130;color:#EAEDF5;padding:16px;'>
-        <div style='text-align:center;'>
-          <span style='font-size:20px;font-weight:bold;color:#FF6B35;'>⬡ NEXUS POS</span><br>
-          <span style='color:#8892AA;'>Point of Sale System</span><br>
-          <span style='color:#505870;'>─────────────────────────────────────</span>
-        </div><br>
-        <b>Order No:</b> {o['order_no']}<br>
-        <b>Date:</b> {o['created_at']}<br>
-        <b>Payment:</b> {o['payment_type']}<br>
-        <span style='color:#505870;'>─────────────────────────────────────</span><br>
-        <table width='100%' cellspacing='4'>
-          <tr style='color:#FF8C5A;font-weight:bold;'>
-            <td>Item</td><td align='center'>Qty</td>
-            <td align='right'>Price</td><td align='right'>Total</td>
-          </tr>{items_html}
-        </table>
-        <span style='color:#505870;'>─────────────────────────────────────</span><br>
-        <table width='100%'>
-          <tr><td>Subtotal:</td>
-              <td align='right'>${o['subtotal']:.2f}</td></tr>
-          <tr><td>Discount:</td>
-              <td align='right' style='color:#FFAA00;'>-${o['discount']:.2f}</td></tr>
-          <tr><td>Tax ({o['tax_rate']:.1f}%):</td>
-              <td align='right'>${o['tax_amount']:.2f}</td></tr>
-          <tr><td style='font-size:16px;font-weight:bold;color:#FF6B35;'>TOTAL:</td>
-              <td align='right' style='font-size:16px;font-weight:bold;color:#FF6B35;'>
-                ${o['total']:.2f}</td></tr>
-          <tr><td>Paid:</td>
-              <td align='right' style='color:#00D68F;'>${o['paid']:.2f}</td></tr>
-          <tr><td>Change:</td>
-              <td align='right' style='color:#00D68F;'>${o['change']:.2f}</td></tr>
-        </table><br>
-        <div style='text-align:center;color:#505870;'>
-          {o.get('note', '') or ''}<br>
-          ─────────────────────────────────────<br>
-          Thank you for your purchase!
-        </div></body></html>"""
+        content = QWidget()
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(32, 32, 32, 32)
+        cl.setSpacing(4)
 
-    def _print(self) -> None:
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        dlg = QPrintDialog(printer, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            doc = QTextDocument()
-            doc.setHtml(self._html())
-            doc.print_(printer)
+        def lbl(text, bold=False, size=12, align=Qt.AlignmentFlag.AlignLeft, color=None):
+            l = QLabel(text)
+            l.setAlignment(align)
+            style = f"font-size: {size}px;"
+            if bold:   style += "font-weight: 700;"
+            if color:  style += f"color: {color};"
+            l.setStyleSheet(style)
+            return l
 
-    def _save(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Receipt",
-            f"receipt_{self.order['order_no']}.txt",
-            "Text Files (*.txt)",
+        cl.addWidget(lbl("NEXUS POS", True, 22, Qt.AlignmentFlag.AlignCenter, T['accent']))
+        cl.addWidget(lbl("Point of Sale System", False, 11,
+                         Qt.AlignmentFlag.AlignCenter, T['text_muted']))
+        cl.addSpacing(10)
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {T['border']};"); cl.addWidget(sep)
+
+        cl.addWidget(lbl(f"Order: {self._order['order_no']}", True))
+        cl.addWidget(lbl(f"Date:  {self._order.get('created_at', now_str())[:19]}",
+                         color=T['text_muted']))
+        cl.addWidget(lbl(f"Cashier: {self._order.get('username', '—')}",
+                         color=T['text_muted']))
+        cl.addSpacing(6)
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet(f"color: {T['border']};"); cl.addWidget(sep2)
+
+        for item in self._items:
+            row = QHBoxLayout()
+            name_l = QLabel(f"{item['name']} ×{item['qty']}")
+            name_l.setStyleSheet("font-size: 12px;")
+            subtot = QLabel(format_currency(item['subtotal']))
+            subtot.setStyleSheet("font-size: 12px; font-weight: 600;")
+            subtot.setAlignment(Qt.AlignmentFlag.AlignRight)
+            row.addWidget(name_l)
+            row.addWidget(subtot)
+            cl.addLayout(row)
+            unit_l = QLabel(f"  @ {format_currency(item['price'])}")
+            unit_l.setStyleSheet(f"font-size: 11px; color: {T['text_muted']};")
+            cl.addWidget(unit_l)
+
+        cl.addSpacing(6)
+        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet(f"color: {T['border']};"); cl.addWidget(sep3)
+
+        def total_row(label, value, bold=False, color=None):
+            row = QHBoxLayout()
+            l = QLabel(label); v = QLabel(format_currency(value))
+            v.setAlignment(Qt.AlignmentFlag.AlignRight)
+            if bold:
+                l.setStyleSheet("font-weight: 700; font-size: 14px;")
+                v.setStyleSheet(f"font-weight: 700; font-size: 14px; "
+                                f"color: {color or T['success']};")
+            elif color:
+                v.setStyleSheet(f"color: {color};")
+            row.addWidget(l); row.addWidget(v)
+            cl.addLayout(row)
+
+        total_row("Subtotal:", self._order['subtotal'])
+        if self._order['discount'] > 0:
+            total_row("Discount:", -self._order['discount'], color=T['warning'])
+        total_row("Tax:", self._order['tax'])
+        total_row("TOTAL:", self._order['total'], True)
+        total_row("Payment:", self._order['payment'])
+        total_row("Change:", self._order['change_due'], color=T['info'])
+        cl.addWidget(lbl(f"Method: {self._order['pay_method'].upper()}",
+                         color=T['text_muted']))
+        cl.addSpacing(14)
+        cl.addWidget(lbl("Thank you for your purchase!", False, 12,
+                         Qt.AlignmentFlag.AlignCenter, T['text_muted']))
+        cl.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(16, 8, 16, 16)
+        print_btn = QPushButton("🖨  Print")
+        print_btn.setObjectName("primary")
+        print_btn.clicked.connect(self._print_receipt)
+        pdf_btn = QPushButton("📄  Save PDF")
+        pdf_btn.setObjectName("ghost")
+        pdf_btn.clicked.connect(self._save_pdf)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(print_btn)
+        btn_row.addWidget(pdf_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _receipt_text(self) -> str:
+        lines = ["=" * 38, "         NEXUS POS SYSTEM", "=" * 38,
+                 f"Order: {self._order['order_no']}",
+                 f"Date:  {self._order.get('created_at', now_str())[:19]}",
+                 f"Cashier: {self._order.get('username', '—')}", "-" * 38]
+        for item in self._items:
+            lines.append(f"{item['name'][:20]:<20} ×{item['qty']}")
+            lines.append(f"  @ {format_currency(item['price'])} = {format_currency(item['subtotal'])}")
+        lines += ["-" * 38,
+                  f"Subtotal: {format_currency(self._order['subtotal']):>12}",
+                  f"Discount: {format_currency(self._order['discount']):>12}",
+                  f"Tax:      {format_currency(self._order['tax']):>12}",
+                  f"TOTAL:    {format_currency(self._order['total']):>12}",
+                  f"Payment:  {format_currency(self._order['payment']):>12}",
+                  f"Change:   {format_currency(self._order['change_due']):>12}",
+                  "=" * 38, "   Thank you for your purchase!", "=" * 38]
+        return "\n".join(lines)
+
+    def _print_receipt(self):
+        """FIX: use QPageSize instead of deprecated QPrinter.PageSize enum."""
+        try:
+            from PySide6.QtPrintSupport import QPrinter, QPrintDialog
+            from PySide6.QtGui import QTextDocument, QPageSize
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            dlg = QPrintDialog(printer, self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                doc = QTextDocument()
+                doc.setPlainText(self._receipt_text())
+                doc.print_(printer)
+        except Exception as e:
+            QMessageBox.warning(self, "Print Error", str(e))
+
+    def _save_pdf(self):
+        try:
+            from reportlab.lib.pagesizes import A6
+            from reportlab.platypus import SimpleDocTemplate, Paragraph
+            from reportlab.lib.styles import getSampleStyleSheet
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Receipt PDF",
+                f"receipt_{self._order['order_no']}.pdf", "PDF Files (*.pdf)")
+            if not path:
+                return
+            doc = SimpleDocTemplate(path, pagesize=A6)
+            styles = getSampleStyleSheet()
+            story = [Paragraph(line.replace(" ", "&nbsp;"), styles['Code'])
+                     for line in self._receipt_text().split("\n")]
+            doc.build(story)
+            QMessageBox.information(self, "Saved", f"Receipt saved to:\n{path}")
+        except ImportError:
+            QMessageBox.warning(self, "Missing library",
+                                "Install reportlab:\npip install reportlab")
+        except Exception as e:
+            QMessageBox.critical(self, "PDF Error", str(e))
+
+
+# ─── POS Tab ───────────────────────────────────────────────────────────────────
+class PosTab(QWidget):
+    order_completed = Signal()
+
+    def __init__(self, user, parent=None):
+        super().__init__(parent)
+        self._user = user
+        self._cart: list[dict] = []
+        self._tax_rate = 0.08
+        self._build_ui()
+        self._load_products()
+
+    def _build_ui(self):
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter.setHandleWidth(2)
+
+        # ── LEFT: Product catalog ──────────────────────────────────────────────
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(12, 12, 6, 12)
+        ll.setSpacing(8)
+
+        # Search + category in one row
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍  Search product or SKU…")
+        self.search_input.setFixedHeight(36)
+        self.search_input.textChanged.connect(self._filter_products)
+        filter_row.addWidget(self.search_input, 3)
+
+        self.cat_combo = QComboBox()
+        self.cat_combo.setFixedHeight(36)
+        self.cat_combo.setMinimumWidth(130)
+        self.cat_combo.addItem("All Categories", None)
+        for c in ProductQueries.get_categories():
+            self.cat_combo.addItem(c['name'], c['id'])
+        self.cat_combo.currentIndexChanged.connect(self._filter_products)
+        filter_row.addWidget(self.cat_combo, 2)
+
+        ll.addLayout(filter_row)
+
+        self.product_scroll = QScrollArea()
+        self.product_scroll.setWidgetResizable(True)
+        self.product_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.product_container = QWidget()
+        self.product_grid = QGridLayout(self.product_container)
+        self.product_grid.setSpacing(8)
+        self.product_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.product_scroll.setWidget(self.product_container)
+        ll.addWidget(self.product_scroll)
+        splitter.addWidget(left)
+
+        # ── RIGHT: Cart ────────────────────────────────────────────────────────
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(6, 12, 12, 12)
+        rl.setSpacing(8)
+
+        order_hdr = QHBoxLayout()
+        self.order_lbl = QLabel("NEW ORDER")
+        self.order_lbl.setStyleSheet(
+            f"font-size: 13px; font-weight: 700; color: {T['accent']};")
+        order_hdr.addWidget(self.order_lbl)
+        order_hdr.addStretch()
+        self.order_no_lbl = QLabel("")
+        self.order_no_lbl.setStyleSheet(f"color: {T['text_muted']}; font-size: 11px;")
+        order_hdr.addWidget(self.order_no_lbl)
+        rl.addLayout(order_hdr)
+
+        # Cart table
+        # FIX: connect cellDoubleClicked ONCE here, not inside _refresh_cart
+        self.cart_table = QTableWidget()
+        self.cart_table.setColumnCount(5)
+        self.cart_table.setHorizontalHeaderLabels(["Product", "Price", "Qty", "Subtotal", ""])
+        self.cart_table.verticalHeader().setVisible(False)
+        self.cart_table.verticalHeader().setDefaultSectionSize(34)
+        self.cart_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.cart_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.cart_table.setAlternatingRowColors(True)
+        self.cart_table.setShowGrid(True)
+        self.cart_table.setStyleSheet(
+            f"QTableWidget {{ alternate-background-color: {T['surface2']}; }}")
+
+        ch = self.cart_table.horizontalHeader()
+        ch.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        ch.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.cart_table.setColumnWidth(1, 75)
+        ch.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.cart_table.setColumnWidth(2, 50)
+        ch.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.cart_table.setColumnWidth(3, 85)
+        ch.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.cart_table.setColumnWidth(4, 30)
+        ch.setHighlightSections(False)
+        self.cart_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.cart_table.setMinimumHeight(200)
+
+        # FIX: connect ONCE here so it doesn't stack duplicate connections on every refresh
+        self.cart_table.cellDoubleClicked.connect(self._edit_cart_item)
+        rl.addWidget(self.cart_table)
+
+        # Cart actions
+        cart_act = QHBoxLayout()
+        clear_btn = QPushButton("🗑  Clear Cart")
+        clear_btn.setObjectName("danger")
+        clear_btn.setFixedHeight(30)
+        clear_btn.clicked.connect(self._clear_cart)
+        cart_act.addWidget(clear_btn)
+        cart_act.addStretch()
+        hint = QLabel("Double-click item to edit")
+        hint.setStyleSheet(f"color: {T['text_dim']}; font-size: 11px;")
+        cart_act.addWidget(hint)
+        rl.addLayout(cart_act)
+
+        # Discount / tax row
+        disc_row = QHBoxLayout()
+        disc_row.addWidget(QLabel("Discount ($):"))
+        self.discount_spin = QDoubleSpinBox()
+        self.discount_spin.setRange(0, 999999)
+        self.discount_spin.setDecimals(2)
+        self.discount_spin.setFixedWidth(90)
+        self.discount_spin.setFixedHeight(32)
+        self.discount_spin.valueChanged.connect(self._update_totals)
+        disc_row.addWidget(self.discount_spin)
+        disc_row.addStretch()
+        disc_row.addWidget(QLabel(f"Tax ({int(self._tax_rate * 100)}%):"))
+        self.tax_lbl = QLabel("$0.00")
+        self.tax_lbl.setStyleSheet(f"color: {T['text_muted']};")
+        disc_row.addWidget(self.tax_lbl)
+        rl.addLayout(disc_row)
+
+        # Summary card
+        summary = QFrame()
+        summary.setObjectName("card2")
+        sl = QGridLayout(summary)
+        sl.setContentsMargins(14, 10, 14, 10)
+        sl.setSpacing(3)
+        sl.setColumnStretch(0, 1)
+
+        self.subtotal_lbl = QLabel("$0.00")
+        sl.addWidget(QLabel("Subtotal:"), 0, 0)
+        sl.addWidget(self.subtotal_lbl, 0, 1, Qt.AlignmentFlag.AlignRight)
+
+        total_title = QLabel("TOTAL:")
+        total_title.setStyleSheet("font-weight: 700; font-size: 15px;")
+        self.total_lbl = QLabel("$0.00")
+        self.total_lbl.setStyleSheet(
+            f"font-size: 24px; font-weight: 900; color: {T['success']};")
+        sl.addWidget(total_title, 1, 0)
+        sl.addWidget(self.total_lbl, 1, 1, Qt.AlignmentFlag.AlignRight)
+        rl.addWidget(summary)
+
+        # Payment row
+        pay_row = QHBoxLayout()
+        pay_row.setSpacing(8)
+        pay_row.addWidget(QLabel("Method:"))
+        self.pay_method = QComboBox()
+        self.pay_method.addItems(["Cash", "Card", "GCash", "PayMaya", "Other"])
+        self.pay_method.setFixedHeight(32)
+        pay_row.addWidget(self.pay_method)
+        pay_row.addWidget(QLabel("Received:"))
+        self.payment_spin = QDoubleSpinBox()
+        self.payment_spin.setRange(0, 999999)
+        self.payment_spin.setDecimals(2)
+        self.payment_spin.setFixedHeight(32)
+        self.payment_spin.setMinimumWidth(90)
+        self.payment_spin.valueChanged.connect(self._update_change)
+        pay_row.addWidget(self.payment_spin)
+        pay_row.addWidget(QLabel("Change:"))
+        self.change_lbl = QLabel("$0.00")
+        self.change_lbl.setStyleSheet(f"color: {T['info']}; font-weight: 600;")
+        pay_row.addWidget(self.change_lbl)
+        rl.addLayout(pay_row)
+
+        # Checkout button
+        self.checkout_btn = QPushButton("✅  COMPLETE SALE")
+        self.checkout_btn.setObjectName("success")
+        self.checkout_btn.setFixedHeight(48)
+        self.checkout_btn.setStyleSheet(
+            f"QPushButton#success {{ font-size: 15px; font-weight: 700; "
+            f"letter-spacing: 1px; border-radius: 10px; }}"
         )
-        if path:
-            with open(path, "w") as f:
-                f.write(self._txt.toPlainText())
-            QMessageBox.information(self, "Saved", f"Receipt saved:\n{path}")
+        self.checkout_btn.clicked.connect(self._checkout)
+        rl.addWidget(self.checkout_btn)
+
+        splitter.addWidget(right)
+        splitter.setSizes([560, 440])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(splitter)
+
+        self._update_order_no()
+
+    def _update_order_no(self):
+        no = next_order_no()
+        self.order_no_lbl.setText(f"#{no}")
+        self._current_order_no = no
+
+    # ── Product grid ───────────────────────────────────────────────────────────
+    def _load_products(self, search="", category_id=None):
+        while self.product_grid.count():
+            item = self.product_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        products = ProductQueries.search(search) if search else ProductQueries.get_all()
+        if category_id:
+            products = [p for p in products if p['category_id'] == category_id]
+
+        cols = 3
+        for idx, product in enumerate(products):
+            card = self._make_product_card(product)
+            self.product_grid.addWidget(card, idx // cols, idx % cols)
+
+    def _make_product_card(self, product) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card2")
+        card.setFixedHeight(86)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(2)
+
+        name_lbl = QLabel(product['name'])
+        name_lbl.setStyleSheet("font-weight: 600; font-size: 12px;")
+        name_lbl.setWordWrap(True)
+        lay.addWidget(name_lbl)
+
+        price_lbl = QLabel(format_currency(product['price']))
+        price_lbl.setStyleSheet(f"color: {T['success']}; font-weight: 700; font-size: 13px;")
+        lay.addWidget(price_lbl)
+
+        stock_color = T['danger'] if product['stock'] <= product['low_stock'] else T['text_muted']
+        stock_lbl = QLabel(f"Stock: {product['stock']} {product['unit']}")
+        stock_lbl.setStyleSheet(f"color: {stock_color}; font-size: 11px;")
+        lay.addWidget(stock_lbl)
+
+        def on_click(event, p=product):
+            if p['stock'] <= 0:
+                QMessageBox.warning(self, "Out of Stock", f"'{p['name']}' is out of stock.")
+                return
+            self._add_to_cart(p)
+
+        card.mousePressEvent = on_click
+
+        if product['stock'] <= 0:
+            card.setStyleSheet(
+                f"QFrame#card2 {{ background: {T['surface']}; "
+                f"border: 1px solid {T['surface3']}; border-radius: 8px; }}")
+            name_lbl.setStyleSheet("font-weight: 600; font-size: 12px; color: #555;")
+
+        return card
+
+    def _filter_products(self):
+        self._load_products(
+            self.search_input.text().strip(),
+            self.cat_combo.currentData()
+        )
+
+    # ── Cart logic ─────────────────────────────────────────────────────────────
+    def _add_to_cart(self, product):
+        for item in self._cart:
+            if item['product_id'] == product['id']:
+                if item['qty'] >= product['stock']:
+                    QMessageBox.warning(self, "Stock Limit",
+                                        f"Only {product['stock']} units available.")
+                    return
+                item['qty'] += 1
+                item['subtotal'] = item['qty'] * item['price']
+                self._refresh_cart()
+                return
+        self._cart.append({
+            'product_id': product['id'],
+            'name': product['name'],
+            'price': product['price'],
+            'qty': 1,
+            'subtotal': product['price'],
+        })
+        self._refresh_cart()
+
+    def _refresh_cart(self):
+        RIGHT  = Qt.AlignmentFlag.AlignRight  | Qt.AlignmentFlag.AlignVCenter
+        CENTER = Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
+
+        # FIX: block signals while repopulating to prevent cellDoubleClicked firing
+        self.cart_table.blockSignals(True)
+        self.cart_table.setRowCount(0)
+        self.cart_table.setRowCount(len(self._cart))
+
+        for i, item in enumerate(self._cart):
+            self.cart_table.setItem(i, 0, QTableWidgetItem(item['name']))
+            self.cart_table.setItem(i, 1, make_table_item(
+                format_currency(item['price']), RIGHT))
+            self.cart_table.setItem(i, 2, make_table_item(str(item['qty']), CENTER))
+            self.cart_table.setItem(i, 3, make_table_item(
+                format_currency(item['subtotal']), RIGHT, T['success']))
+
+            rm_btn = QPushButton("✕")
+            rm_btn.setFixedSize(24, 24)
+            rm_btn.setStyleSheet(
+                f"QPushButton {{ background: {T['danger']}; color: white; "
+                f"border: none; border-radius: 4px; font-size: 10px; }}")
+            rm_btn.clicked.connect(lambda _, idx=i: self._remove_cart_item(idx))
+            self.cart_table.setCellWidget(i, 4, rm_btn)
+
+        self.cart_table.blockSignals(False)
+        self._update_totals()
+
+    def _edit_cart_item(self, row, col):
+        # FIX: ignore clicks on the remove-button column
+        if col == 4 or row >= len(self._cart):
+            return
+        dlg = EditCartItemDialog(self._cart[row], self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            qty, price = dlg.get_values()
+            self._cart[row]['qty']      = qty
+            self._cart[row]['price']    = price
+            self._cart[row]['subtotal'] = qty * price
+            self._refresh_cart()
+
+    def _remove_cart_item(self, idx):
+        if 0 <= idx < len(self._cart):
+            self._cart.pop(idx)
+            self._refresh_cart()
+
+    def _clear_cart(self):
+        if not self._cart:
+            return
+        if QMessageBox.question(
+                self, "Clear Cart", "Clear all items?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes:
+            self._cart.clear()
+            self._refresh_cart()
+
+    # ── Totals ─────────────────────────────────────────────────────────────────
+    def _calc(self):
+        subtotal = sum(i['subtotal'] for i in self._cart)
+        discount = self.discount_spin.value()
+        tax      = (subtotal - discount) * self._tax_rate
+        total    = subtotal - discount + tax
+        return subtotal, discount, tax, max(0.0, total)
+
+    def _update_totals(self):
+        subtotal, _, tax, total = self._calc()
+        self.subtotal_lbl.setText(format_currency(subtotal))
+        self.tax_lbl.setText(format_currency(tax))
+        self.total_lbl.setText(format_currency(total))
+        self._update_change()
+
+    def _update_change(self):
+        _, _, _, total = self._calc()
+        payment = self.payment_spin.value()
+        change  = payment - total
+        self.change_lbl.setText(format_currency(max(0.0, change)))
+        if change < 0 and self.pay_method.currentText() == "Cash":
+            self.change_lbl.setStyleSheet(f"color: {T['danger']}; font-weight: 600;")
+        else:
+            self.change_lbl.setStyleSheet(f"color: {T['info']}; font-weight: 600;")
+
+    # ── Checkout ───────────────────────────────────────────────────────────────
+    def _checkout(self):
+        if not self._cart:
+            QMessageBox.warning(self, "Empty Cart", "Add items to the cart first.")
+            return
+
+        subtotal, discount, tax, total = self._calc()
+        payment = self.payment_spin.value()
+        method  = self.pay_method.currentText().lower()
+
+        if method == "cash" and payment < total:
+            QMessageBox.warning(
+                self, "Insufficient Payment",
+                f"Payment {format_currency(payment)} < Total {format_currency(total)}")
+            return
+
+        change   = max(0.0, payment - total)
+        order_no = self._current_order_no
+
+        order_id = OrderQueries.create_order(
+            order_no=order_no, user_id=self._user['id'],
+            items=self._cart, subtotal=subtotal, discount=discount,
+            tax=tax, total=total, payment=payment,
+            change_due=change, pay_method=method,
+        )
+
+        order, items = OrderQueries.get_by_id(order_id)
+        order_dict   = dict(order)
+        order_dict['username'] = self._user['username']
+
+        receipt = ReceiptDialog(order_dict, [dict(i) for i in items], self)
+        receipt.exec()
+
+        # Reset cart
+        self._cart.clear()
+        self.discount_spin.setValue(0)
+        self.payment_spin.setValue(0)
+        self._refresh_cart()
+        self._update_order_no()
+        self._load_products()
+
+        # FIX: emit AFTER the receipt dialog closes so reports/dashboard refresh correctly
+        self.order_completed.emit()

@@ -1,28 +1,44 @@
+from __future__ import annotations
 import csv
+import os
 from datetime import datetime
-from pathlib import Path
+from database.connection import get_db
 
 
 def next_order_no() -> str:
-    """
-    Generate a human-readable order number.
-    Pattern: ORD-YYYYMMDD-NNNN  (sequential per run; DB enforces uniqueness)
-    """
-    from database.connection import get_db  # lazy import avoids circular deps
     conn = get_db()
-    n = conn.execute("SELECT COUNT(*) as n FROM orders").fetchone()["n"] + 1
-    conn.close()
-    return f"ORD-{datetime.now().strftime('%Y%m%d')}-{n:04d}"
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) as c FROM orders WHERE date(created_at)=date('now')"
+        ).fetchone()
+        seq = (row["c"] or 0) + 1
+        return f"ORD-{datetime.now().strftime('%Y%m%d')}-{seq:04d}"
+    finally:
+        conn.close()
 
 
-def format_currency(value: float, symbol: str = "$") -> str:
-    """Format a float as a currency string: $1,234.56"""
-    return f"{symbol}{value:,.2f}"
+def format_currency(amount: float, symbol: str = "$") -> str:
+    return f"{symbol}{amount:,.2f}"
 
 
-def export_csv(path: str | Path, headers: list[str], rows: list[list]) -> None:
-    """Write *rows* (list of lists) to a CSV file at *path*."""
-    with open(path, "w", newline="", encoding="utf-8") as f:
+def export_csv(rows, headers: list[str], filepath: str):
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(headers)
-        writer.writerows(rows)
+        for row in rows:
+            writer.writerow([row[h] if h in row.keys() else "" for h in headers])
+
+
+def today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def short_date(dt_str: str) -> str:
+    try:
+        return datetime.strptime(dt_str[:19], "%Y-%m-%d %H:%M:%S").strftime("%d %b %Y %H:%M")
+    except Exception:
+        return dt_str

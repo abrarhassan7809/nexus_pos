@@ -1,322 +1,376 @@
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTableWidgetItem,
-                               QMessageBox, QDialog, QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox, QHeaderView,
-                               QInputDialog)
-from PySide6.QtCore import Qt
+from __future__ import annotations
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QFrame, QDialog, QFormLayout, QComboBox,
+    QSpinBox, QDoubleSpinBox, QMessageBox, QTableWidget,
+    QTableWidgetItem, QHeaderView, QSizePolicy, QAbstractItemView
+)
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
-from database.queries import ProductQueries
-from utils.theme import THEME
-from widgets.base import SectionTitle, StatCard, styled_table
+from database import ProductQueries
+from utils import format_currency, short_date
+from utils.theme import THEME as T
+from widgets import styled_table, make_table_item, SectionTitle
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  INVENTORY TAB
-# ═══════════════════════════════════════════════════════════════════
-class InventoryTab(QWidget):
-    def __init__(self, current_user: dict, parent=None):
+# ─── Product Dialog ────────────────────────────────────────────────────────────
+class ProductDialog(QDialog):
+    def __init__(self, product=None, parent=None):
         super().__init__(parent)
-        self.current_user = current_user
+        self._product = product
+        self.setWindowTitle("Edit Product" if product else "Add Product")
+        self.setMinimumWidth(400)
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+        layout.addWidget(QLabel("<b>Edit Product</b>" if self._product else "<b>Add New Product</b>"))
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.sku = QLineEdit(self._product['sku'] if self._product else "")
+        self.sku.setPlaceholderText("e.g. BEV001")
+        form.addRow("SKU *:", self.sku)
+
+        self.name = QLineEdit(self._product['name'] if self._product else "")
+        self.name.setPlaceholderText("Product name")
+        form.addRow("Name *:", self.name)
+
+        self.category = QComboBox()
+        cats = ProductQueries.get_categories()
+        for c in cats:
+            self.category.addItem(c['name'], c['id'])
+        if self._product and self._product['category_id']:
+            idx = self.category.findData(self._product['category_id'])
+            if idx >= 0:
+                self.category.setCurrentIndex(idx)
+        form.addRow("Category:", self.category)
+
+        self.price = QDoubleSpinBox()
+        self.price.setRange(0, 999999)
+        self.price.setDecimals(2)
+        self.price.setValue(self._product['price'] if self._product else 0)
+        form.addRow("Selling Price *:", self.price)
+
+        self.cost = QDoubleSpinBox()
+        self.cost.setRange(0, 999999)
+        self.cost.setDecimals(2)
+        self.cost.setValue(self._product['cost'] if self._product else 0)
+        form.addRow("Cost Price:", self.cost)
+
+        self.stock = QSpinBox()
+        self.stock.setRange(0, 999999)
+        self.stock.setValue(self._product['stock'] if self._product else 0)
+        form.addRow("Stock:", self.stock)
+
+        self.low_stock = QSpinBox()
+        self.low_stock.setRange(0, 999999)
+        self.low_stock.setValue(self._product['low_stock'] if self._product else 10)
+        form.addRow("Low Stock Alert:", self.low_stock)
+
+        self.unit = QLineEdit(self._product['unit'] if self._product else "pcs")
+        form.addRow("Unit:", self.unit)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        save = QPushButton("Save Product")
+        save.setObjectName("primary")
+        save.clicked.connect(self._save)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addStretch()
+        btns.addWidget(cancel)
+        btns.addWidget(save)
+        layout.addLayout(btns)
+
+    def _save(self):
+        if not self.sku.text().strip() or not self.name.text().strip():
+            QMessageBox.warning(self, "Validation", "SKU and Name are required.")
+            return
+        self.accept()
+
+    def get_data(self) -> dict:
+        return {
+            'sku': self.sku.text().strip(),
+            'name': self.name.text().strip(),
+            'category_id': self.category.currentData(),
+            'price': self.price.value(),
+            'cost': self.cost.value(),
+            'stock': self.stock.value(),
+            'low_stock': self.low_stock.value(),
+            'unit': self.unit.text().strip() or 'pcs',
+        }
+
+
+# ─── Stock Adjust Dialog ───────────────────────────────────────────────────────
+class StockAdjustDialog(QDialog):
+    def __init__(self, product, parent=None):
+        super().__init__(parent)
+        self._product = product
+        self.setWindowTitle(f"Adjust Stock — {product['name']}")
+        self.setFixedSize(360, 200)
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+        layout.addWidget(
+            QLabel(f"Current stock: <b>{self._product['stock']} {self._product['unit']}</b>"))
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.change_spin = QSpinBox()
+        self.change_spin.setRange(-9999, 9999)
+        self.change_spin.setValue(0)
+        form.addRow("Change (+ add / − remove):", self.change_spin)
+
+        self.reason_input = QLineEdit()
+        self.reason_input.setPlaceholderText("e.g. New delivery, Damage, Correction")
+        form.addRow("Reason:", self.reason_input)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        ok = QPushButton("Apply")
+        ok.setObjectName("primary")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addStretch()
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        layout.addLayout(btns)
+
+    def get_values(self):
+        return self.change_spin.value(), self.reason_input.text().strip() or "Manual adjustment"
+
+
+# ─── Stock Log Dialog ──────────────────────────────────────────────────────────
+class StockLogDialog(QDialog):
+    def __init__(self, product, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Stock History — {product['name']}")
+        self.setMinimumSize(560, 420)
+        self._product = product
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # Change=70 fixed, Reason=stretch, User=100 fixed, Date=160 fixed
+        tbl = styled_table(["Change", "Reason", "User", "Date"],
+                           col_widths=[70, None, 100, 160], stretch_col=1)
+        rows = ProductQueries.get_stock_log(self._product['id'])
+        tbl.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            color = T['success'] if r['change'] > 0 else T['danger']
+            ch_text = f"+{r['change']}" if r['change'] > 0 else str(r['change'])
+            ch = make_table_item(ch_text,
+                                 Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter,
+                                 color)
+            tbl.setItem(i, 0, ch)
+            tbl.setItem(i, 1, QTableWidgetItem(r['reason']))
+            tbl.setItem(i, 2, QTableWidgetItem(r['username'] or '—'))
+            tbl.setItem(i, 3, QTableWidgetItem(short_date(r['created_at'])))
+        layout.addWidget(tbl)
+
+        close = QPushButton("Close")
+        close.setObjectName("ghost")
+        close.setFixedWidth(80)
+        close.clicked.connect(self.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close)
+        layout.addLayout(btn_row)
+
+
+# ─── Inventory Tab ─────────────────────────────────────────────────────────────
+class InventoryTab(QWidget):
+    def __init__(self, user, parent=None):
+        super().__init__(parent)
+        self._user = user
+        self._all_products = []
         self._build_ui()
         self.refresh()
 
-    def _build_ui(self) -> None:
-        lay = QVBoxLayout(self)
-        lay.setSpacing(8)
-        lay.setContentsMargins(12, 12, 12, 12)
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
 
-        # Header
+        # ── Header row ─────────────────────────────────────────────────────────
         hdr = QHBoxLayout()
-        hdr.addWidget(SectionTitle("Inventory Management"))
+        hdr.setSpacing(8)
+        hdr.addWidget(SectionTitle("Inventory"))
         hdr.addStretch()
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("🔍  Search…")
-        self._search.setFixedWidth(220); self._search.setFixedHeight(34)
-        self._search.textChanged.connect(self.refresh)
-        hdr.addWidget(self._search)
-        lay.addLayout(hdr)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("🔍  Search name / SKU…")
+        self.search.setFixedHeight(34)
+        self.search.setMinimumWidth(160)
+        self.search.setMaximumWidth(260)
+        self.search.textChanged.connect(self._filter)
+        hdr.addWidget(self.search)
 
-        # Stat cards
-        sr = QHBoxLayout()
-        self._c_total = StatCard("Total Products", "—", "📦", THEME["accent"])
-        self._c_low   = StatCard("Low Stock",      "—", "⚠",  THEME["warning"])
-        self._c_out   = StatCard("Out of Stock",   "—", "✖",  THEME["danger"])
-        self._c_val   = StatCard("Inventory Value","—", "$",  THEME["success"])
-        for c in [self._c_total, self._c_low, self._c_out, self._c_val]:
-            sr.addWidget(c)
-        lay.addLayout(sr)
+        self.cat_filter = QComboBox()
+        self.cat_filter.setFixedHeight(34)
+        self.cat_filter.addItem("All Categories", None)
+        cats = ProductQueries.get_categories()
+        for c in cats:
+            self.cat_filter.addItem(c['name'], c['id'])
+        self.cat_filter.currentIndexChanged.connect(self._filter)
+        hdr.addWidget(self.cat_filter)
 
-        # Action buttons
-        br = QHBoxLayout()
-        add_btn  = QPushButton("➕  Add Product");   add_btn.setObjectName("accent_btn"); add_btn.clicked.connect(self._add)
-        edit_btn = QPushButton("✏  Edit");            edit_btn.clicked.connect(self._edit)
-        del_btn  = QPushButton("🗑  Delete");          del_btn.setObjectName("danger_btn"); del_btn.clicked.connect(self._delete)
-        adj_btn  = QPushButton("📥  Adjust Stock");   adj_btn.clicked.connect(self._adjust)
-        log_btn  = QPushButton("📋  Stock Log");       log_btn.clicked.connect(self._show_log)
-        for b in [add_btn, edit_btn, del_btn, adj_btn, log_btn]:
-            br.addWidget(b)
-        br.addStretch()
-        lay.addLayout(br)
+        refresh_btn = QPushButton("⟳")
+        refresh_btn.setObjectName("ghost")
+        refresh_btn.setFixedSize(50, 34)
+        refresh_btn.setToolTip("Refresh")
+        refresh_btn.clicked.connect(self.refresh)
+        hdr.addWidget(refresh_btn)
 
-        # Product table
-        self._tbl = styled_table(
-            ["ID", "Product", "Category", "Price", "Cost",
-             "Stock", "Low Stk", "Unit", "Barcode", "Status"]
+        add_btn = QPushButton("＋  Add Product")
+        add_btn.setObjectName("primary")
+        add_btn.setFixedHeight(34)
+        add_btn.clicked.connect(self._add_product)
+        hdr.addWidget(add_btn)
+        layout.addLayout(hdr)
+
+        # ── Stats strip ────────────────────────────────────────────────────────
+        stats_row = QHBoxLayout()
+        self.total_lbl = QLabel()
+        self.total_lbl.setStyleSheet(f"color: {T['text_muted']}; font-size: 12px;")
+        self.low_lbl = QLabel()
+        self.low_lbl.setStyleSheet(f"color: {T['warning']}; font-size: 12px;")
+        stats_row.addWidget(self.total_lbl)
+        stats_row.addSpacing(16)
+        stats_row.addWidget(self.low_lbl)
+        stats_row.addStretch()
+        layout.addLayout(stats_row)
+
+        # ── Table ──────────────────────────────────────────────────────────────
+        # Columns: SKU | Name(stretch) | Category | Price | Cost | Stock | Unit | Alert | Actions
+        self.table = styled_table(
+            ["SKU", "Name", "Category", "Price", "Cost", "Stock", "Unit", "Min", "Actions"],
+            col_widths=[80, None, 110, 100, 100, 100, 80, 80, 250],
+            stretch_col=1   # Name column stretches
         )
-        self._tbl.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
-        )
-        self._tbl.setColumnWidth(0, 40)
-        lay.addWidget(self._tbl)
+        layout.addWidget(self.table)
 
-    # ── Data ──────────────────────────────────────────────────────
-    def refresh(self) -> None:
-        q    = self._search.text().strip()
-        rows = ProductQueries.get_all(search=q)
-        s    = ProductQueries.get_inventory_stats()
+    def refresh(self):
+        self._all_products = list(ProductQueries.get_all())
+        self._populate(self._all_products)
+        total = len(self._all_products)
+        low = sum(1 for p in self._all_products if p['stock'] <= p['low_stock'])
+        self.total_lbl.setText(f"Total: {total} products")
+        self.low_lbl.setText(f"⚠  Low stock: {low}" if low else "")
 
-        self._c_total.set_value(s["total"])
-        self._c_low.set_value(s["low"])
-        self._c_out.set_value(s["out"])
-        self._c_val.set_value(f"${s['value']:,.2f}")
+    def _filter(self):
+        search = self.search.text().lower()
+        cat_id = self.cat_filter.currentData()
+        filtered = [
+            p for p in self._all_products
+            if (search in p['name'].lower() or search in p['sku'].lower())
+            and (cat_id is None or p['category_id'] == cat_id)
+        ]
+        self._populate(filtered)
 
-        self._tbl.setRowCount(0)
-        for r in rows:
-            ri = self._tbl.rowCount()
-            self._tbl.insertRow(ri)
-            status, color = "OK", None
-            if r["stock"] == 0:
-                status, color = "OUT", QColor(THEME["danger"])
-            elif r["stock"] <= r["low_stock"]:
-                status, color = "LOW", QColor(THEME["warning"])
-            cells = [
-                str(r["id"]), r["name"], r["cat_name"] or "",
-                f"${r['price']:.2f}", f"${r['cost']:.2f}",
-                str(r["stock"]), str(r["low_stock"]),
-                r["unit"], r["barcode"] or "", status,
-            ]
-            for ci, txt in enumerate(cells):
-                item = QTableWidgetItem(txt)
-                item.setData(Qt.ItemDataRole.UserRole, r)
-                if color and ci in (5, 9):
-                    item.setForeground(color)
-                self._tbl.setItem(ri, ci, item)
+    def _populate(self, products):
+        RIGHT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        CENTER = Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
 
-    def _selected(self) -> dict | None:
-        row = self._tbl.currentRow()
-        if row < 0:
-            return None
-        return self._tbl.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        self.table.setRowCount(0)          # clear first to avoid stale cells
+        self.table.setRowCount(len(products))
 
-    # ── Slots ─────────────────────────────────────────────────────
-    def _add(self) -> None:
-        if ProductDialog(parent=self).exec() == QDialog.DialogCode.Accepted:
-            self.refresh()
+        for i, p in enumerate(products):
+            self.table.setItem(i, 0, QTableWidgetItem(p['sku']))
+            self.table.setItem(i, 1, QTableWidgetItem(p['name']))
+            self.table.setItem(i, 2, QTableWidgetItem(p['category_name'] or '—'))
+            self.table.setItem(i, 3, make_table_item(format_currency(p['price']), RIGHT))
+            self.table.setItem(i, 4, make_table_item(format_currency(p['cost']),  RIGHT,
+                                                     T['text_muted']))
+            stock_color = T['danger'] if p['stock'] <= p['low_stock'] else T['success']
+            self.table.setItem(i, 5, make_table_item(str(p['stock']), CENTER, stock_color))
+            self.table.setItem(i, 6, make_table_item(p['unit'],       CENTER))
+            self.table.setItem(i, 7, make_table_item(str(p['low_stock']), CENTER))
 
-    def _edit(self) -> None:
-        p = self._selected()
+            # ── Action buttons cell ────────────────────────────────────────────
+            btn_w = QWidget()
+            btn_l = QHBoxLayout(btn_w)
+            btn_l.setContentsMargins(2, 1, 2, 1)
+            btn_l.setSpacing(2)
+
+            for label, obj_name, slot in [
+                ("Edit",  "ghost",   lambda _, pid=p['id']: self._edit_product(pid)),
+                ("Stock", "warning", lambda _, pid=p['id']: self._adjust_stock(pid)),
+                ("Log",   "ghost",   lambda _, pid=p['id']: self._show_log(pid)),
+                ("Del",   "danger",  lambda _, pid=p['id']: self._delete_product(pid)),
+            ]:
+                btn = QPushButton(label)
+                btn.setFixedWidth(50)
+                btn.setFixedHeight(30)
+                btn.setObjectName(obj_name)
+
+                # Add custom styling to reduce internal padding
+                btn.setStyleSheet(f"""
+                        QPushButton#{obj_name} {{
+                            padding: 2px 6px;
+                            font-size: 11px;
+                        }}
+                    """)
+
+                btn.clicked.connect(slot)
+                btn_l.addWidget(btn)
+
+            self.table.setCellWidget(i, 8, btn_w)
+
+    def _add_product(self):
+        dlg = ProductDialog(parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            try:
+                ProductQueries.create(**dlg.get_data())
+                self.refresh()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
+
+    def _edit_product(self, product_id):
+        p = ProductQueries.get_by_id(product_id)
         if not p:
-            QMessageBox.information(self, "Select", "Please select a product.")
             return
-        if ProductDialog(product=p, parent=self).exec() == QDialog.DialogCode.Accepted:
-            self.refresh()
+        dlg = ProductDialog(dict(p), self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            try:
+                ProductQueries.update(product_id, **dlg.get_data())
+                self.refresh()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
 
-    def _delete(self) -> None:
-        p = self._selected()
+    def _adjust_stock(self, product_id):
+        p = ProductQueries.get_by_id(product_id)
         if not p:
             return
-        if (QMessageBox.question(self, "Delete", f"Deactivate '{p['name']}'?",
-                                 QMessageBox.StandardButton.Yes |
-                                 QMessageBox.StandardButton.No)
-                == QMessageBox.StandardButton.Yes):
-            ProductQueries.deactivate(p["id"])
+        dlg = StockAdjustDialog(dict(p), self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            change, reason = dlg.get_values()
+            if change == 0:
+                return
+            ProductQueries.adjust_stock(product_id, change, reason, self._user['id'])
             self.refresh()
 
-    def _adjust(self) -> None:
-        p = self._selected()
+    def _show_log(self, product_id):
+        p = ProductQueries.get_by_id(product_id)
         if not p:
-            QMessageBox.information(self, "Select", "Please select a product.")
             return
-        if StockAdjustDialog(p, self.current_user, self).exec() == QDialog.DialogCode.Accepted:
+        StockLogDialog(dict(p), self).exec()
+
+    def _delete_product(self, product_id):
+        if QMessageBox.question(
+                self, "Confirm Delete", "Deactivate this product?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) == QMessageBox.StandardButton.Yes:
+            ProductQueries.deactivate(product_id)
             self.refresh()
-
-    def _show_log(self) -> None:
-        p = self._selected()
-        StockLogDialog(p, self).exec()
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  PRODUCT DIALOG
-# ═══════════════════════════════════════════════════════════════════
-class ProductDialog(QDialog):
-    def __init__(self, product: dict | None = None, parent=None):
-        super().__init__(parent)
-        self.product = product
-        self.setWindowTitle("Add Product" if not product else "Edit Product")
-        self.setFixedSize(480, 500)
-        self._build()
-        if product:
-            self._fill(product)
-
-    def _build(self) -> None:
-        lay = QFormLayout(self)
-        lay.setSpacing(12)
-        lay.setContentsMargins(24, 24, 24, 24)
-
-        self._name    = QLineEdit();      self._name.setFixedHeight(34)
-        self._price   = QDoubleSpinBox(); self._price.setRange(0,99999); self._price.setPrefix("$"); self._price.setFixedHeight(34)
-        self._cost    = QDoubleSpinBox(); self._cost.setRange(0,99999);  self._cost.setPrefix("$"); self._cost.setFixedHeight(34)
-        self._stock   = QSpinBox();       self._stock.setRange(0,999999); self._stock.setFixedHeight(34)
-        self._low     = QSpinBox();       self._low.setRange(0,9999); self._low.setValue(5); self._low.setFixedHeight(34)
-        self._unit    = QLineEdit("pcs"); self._unit.setFixedHeight(34)
-        self._barcode = QLineEdit();      self._barcode.setFixedHeight(34)
-
-        self._cat = QComboBox(); self._cat.setFixedHeight(34)
-        for c in ProductQueries.get_categories():
-            self._cat.addItem(c["name"], c["id"])
-
-        lay.addRow("Product Name *", self._name)
-        lay.addRow("Category",        self._cat)
-        lay.addRow("Sale Price *",    self._price)
-        lay.addRow("Cost Price",      self._cost)
-        lay.addRow("Stock Qty",       self._stock)
-        lay.addRow("Low Stock Alert", self._low)
-        lay.addRow("Unit",            self._unit)
-        lay.addRow("Barcode",         self._barcode)
-
-        btns = QHBoxLayout()
-        ok = QPushButton("Save"); ok.setObjectName("accent_btn"); ok.clicked.connect(self._save)
-        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
-        btns.addStretch(); btns.addWidget(cancel); btns.addWidget(ok)
-        lay.addRow(btns)
-
-    def _fill(self, p: dict) -> None:
-        self._name.setText(p["name"])
-        self._price.setValue(p["price"])
-        self._cost.setValue(p["cost"])
-        self._stock.setValue(p["stock"])
-        self._low.setValue(p["low_stock"])
-        self._unit.setText(p["unit"])
-        self._barcode.setText(p["barcode"] or "")
-        for i in range(self._cat.count()):
-            if self._cat.itemData(i) == p["category_id"]:
-                self._cat.setCurrentIndex(i)
-                break
-
-    def _save(self) -> None:
-        name = self._name.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Validation", "Product name is required.")
-            return
-        try:
-            if self.product:
-                ProductQueries.update(
-                    self.product["id"], name, self._cat.currentData(),
-                    self._price.value(), self._cost.value(),
-                    self._stock.value(), self._low.value(),
-                    self._unit.text(), self._barcode.text() or None,
-                )
-            else:
-                ProductQueries.create(
-                    name, self._cat.currentData(),
-                    self._price.value(), self._cost.value(),
-                    self._stock.value(), self._low.value(),
-                    self._unit.text(), self._barcode.text() or None,
-                )
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  STOCK ADJUST DIALOG
-# ═══════════════════════════════════════════════════════════════════
-class StockAdjustDialog(QDialog):
-    def __init__(self, product: dict, current_user: dict, parent=None):
-        super().__init__(parent)
-        self.product = product
-        self.current_user = current_user
-        self.setWindowTitle("Adjust Stock")
-        self.setFixedSize(360, 250)
-        self._build()
-
-    def _build(self) -> None:
-        lay = QVBoxLayout(self)
-        lay.setSpacing(12)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.addWidget(QLabel(f"<b>{self.product['name']}</b>"))
-        lay.addWidget(QLabel(
-            f"Current Stock: <b>{self.product['stock']} {self.product['unit']}</b>"
-        ))
-
-        r1 = QHBoxLayout()
-        r1.addWidget(QLabel("Adjustment:"))
-        self._adj = QSpinBox(); self._adj.setRange(-99999, 99999); self._adj.setValue(0); self._adj.setFixedHeight(34)
-        r1.addWidget(self._adj)
-        lay.addLayout(r1)
-
-        r2 = QHBoxLayout()
-        r2.addWidget(QLabel("Reason:"))
-        self._reason = QLineEdit(); self._reason.setPlaceholderText("e.g. Restock, Damage…")
-        r2.addWidget(self._reason)
-        lay.addLayout(r2)
-
-        btns = QHBoxLayout()
-        ok = QPushButton("Apply"); ok.setObjectName("accent_btn"); ok.clicked.connect(self._apply)
-        cancel = QPushButton("Cancel"); cancel.clicked.connect(self.reject)
-        btns.addStretch(); btns.addWidget(cancel); btns.addWidget(ok)
-        lay.addLayout(btns)
-
-    def _apply(self) -> None:
-        adj = self._adj.value()
-        if adj == 0:
-            return
-        if self.product["stock"] + adj < 0:
-            QMessageBox.warning(self, "Invalid", "Stock cannot go negative.")
-            return
-        ProductQueries.adjust_stock(
-            self.product["id"], adj,
-            self._reason.text() or "Manual Adjustment",
-            self.current_user["id"],
-        )
-        self.accept()
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  STOCK LOG DIALOG
-# ═══════════════════════════════════════════════════════════════════
-class StockLogDialog(QDialog):
-    def __init__(self, product: dict | None = None, parent=None):
-        super().__init__(parent)
-        self.product = product
-        title = f"Stock Log — {product['name']}" if product else "Stock Log — All Products"
-        self.setWindowTitle(title)
-        self.resize(700, 480)
-        self._build()
-
-    def _build(self) -> None:
-        lay = QVBoxLayout(self)
-        self._tbl = styled_table(["Date", "Product", "Change", "Reason", "User"])
-        self._tbl.setColumnWidth(0, 150); self._tbl.setColumnWidth(1, 160)
-        self._tbl.setColumnWidth(2, 70);  self._tbl.setColumnWidth(3, 180)
-        lay.addWidget(self._tbl)
-        close_btn = QPushButton("Close"); close_btn.clicked.connect(self.accept)
-        lay.addWidget(close_btn)
-        self._load()
-
-    def _load(self) -> None:
-        pid = self.product["id"] if self.product else None
-        rows = ProductQueries.get_stock_log(product_id=pid)
-        self._tbl.setRowCount(0)
-        for r in rows:
-            ri = self._tbl.rowCount()
-            self._tbl.insertRow(ri)
-            chg = r["change"]
-            cells = [r["created_at"], r["pname"],
-                     f"{'+' if chg > 0 else ''}{chg}",
-                     r["reason"], r["username"] or ""]
-            for ci, txt in enumerate(cells):
-                item = QTableWidgetItem(txt)
-                if ci == 2:
-                    item.setForeground(
-                        QColor(THEME["success"] if chg > 0 else THEME["danger"])
-                    )
-                self._tbl.setItem(ri, ci, item)
