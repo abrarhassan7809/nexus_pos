@@ -9,7 +9,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from database import ProductQueries
 from utils import format_currency, short_date
-from utils.theme import THEME as T
+from utils.theme import ThemeManager as _TM
+T = _TM().palette
 from widgets import styled_table, make_table_item, SectionTitle
 
 
@@ -192,6 +193,8 @@ class StockLogDialog(QDialog):
 
 # ─── Inventory Tab ─────────────────────────────────────────────────────────────
 class InventoryTab(QWidget):
+    products_changed = Signal()   # emitted after any add/edit/delete/stock-adjust
+
     def __init__(self, user, parent=None):
         super().__init__(parent)
         self._user = user
@@ -257,7 +260,7 @@ class InventoryTab(QWidget):
         self.table = styled_table(
             ["SKU", "Name", "Category", "Price", "Cost", "Stock", "Unit", "Min", "Actions"],
             col_widths=[80, None, 110, 100, 100, 100, 80, 80, 250],
-            stretch_col=1   # Name column stretches
+            stretch_col=1
         )
         layout.addWidget(self.table)
 
@@ -334,6 +337,7 @@ class InventoryTab(QWidget):
             try:
                 ProductQueries.create(**dlg.get_data())
                 self.refresh()
+                self.products_changed.emit()
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
@@ -346,6 +350,7 @@ class InventoryTab(QWidget):
             try:
                 ProductQueries.update(product_id, **dlg.get_data())
                 self.refresh()
+                self.products_changed.emit()
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
@@ -360,6 +365,7 @@ class InventoryTab(QWidget):
                 return
             ProductQueries.adjust_stock(product_id, change, reason, self._user['id'])
             self.refresh()
+            self.products_changed.emit()
 
     def _show_log(self, product_id):
         p = ProductQueries.get_by_id(product_id)
@@ -374,3 +380,4 @@ class InventoryTab(QWidget):
         ) == QMessageBox.StandardButton.Yes:
             ProductQueries.deactivate(product_id)
             self.refresh()
+            self.products_changed.emit()

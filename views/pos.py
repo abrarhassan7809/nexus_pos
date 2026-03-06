@@ -9,9 +9,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from database import ProductQueries, OrderQueries
-from utils import next_order_no, format_currency, now_str
-from utils.theme import THEME as T
+from utils import next_order_no, format_currency, now_str, save_order_txt, save_order_pdf
+from utils.theme import ThemeManager as _TM
+T = _TM().palette
 from widgets import make_table_item
+from widgets.base import ThemedTable
 
 
 # ─── Edit Cart Item Dialog ─────────────────────────────────────────────────────
@@ -60,51 +62,72 @@ class EditCartItemDialog(QDialog):
 
 # ─── Receipt Dialog ────────────────────────────────────────────────────────────
 class ReceiptDialog(QDialog):
+    """
+    Shows the receipt after a sale.
+
+    Buttons:
+      🖨 Print     — send to printer, dialog stays open
+      📄 Save PDF  — pick location, save PDF, dialog stays open
+      💾 Save TXT  — pick location, save TXT, dialog stays open
+      Cancel       — close dialog; caller decides whether to clear the cart
+                     based on dialog result (Rejected = keep cart, Accepted = clear)
+
+    The dialog returns:
+      QDialog.DialogCode.Accepted  when user saves at least once (cart should clear)
+      QDialog.DialogCode.Rejected  when user only cancels (cart stays)
+    """
+
     def __init__(self, order_data: dict, items: list, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Receipt — {order_data['order_no']}")
-        self.setMinimumSize(420, 560)
-        self._order = order_data
-        self._items = items
+        self.setMinimumSize(440, 580)
+        self._order  = order_data
+        self._items  = items
         self._build()
 
     def _build(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
+        # ── Receipt content ────────────────────────────────────────────────────
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         content = QWidget()
         cl = QVBoxLayout(content)
-        cl.setContentsMargins(32, 32, 32, 32)
+        cl.setContentsMargins(32, 28, 32, 20)
         cl.setSpacing(4)
 
-        def lbl(text, bold=False, size=12, align=Qt.AlignmentFlag.AlignLeft, color=None):
+        def lbl(text, bold=False, size=12,
+                align=Qt.AlignmentFlag.AlignLeft, color=None):
             l = QLabel(text)
             l.setAlignment(align)
             style = f"font-size: {size}px;"
-            if bold:   style += "font-weight: 700;"
-            if color:  style += f"color: {color};"
+            if bold:  style += "font-weight: 700;"
+            if color: style += f"color: {color};"
             l.setStyleSheet(style)
             return l
 
-        cl.addWidget(lbl("NEXUS POS", True, 22, Qt.AlignmentFlag.AlignCenter, T['accent']))
+        cl.addWidget(lbl("NEXUS POS", True, 22,
+                         Qt.AlignmentFlag.AlignCenter, T['accent']))
         cl.addWidget(lbl("Point of Sale System", False, 11,
                          Qt.AlignmentFlag.AlignCenter, T['text_muted']))
         cl.addSpacing(10)
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {T['border']};"); cl.addWidget(sep)
 
-        cl.addWidget(lbl(f"Order: {self._order['order_no']}", True))
-        cl.addWidget(lbl(f"Date:  {self._order.get('created_at', now_str())[:19]}",
+        def hr():
+            s = QFrame(); s.setFrameShape(QFrame.Shape.HLine)
+            s.setStyleSheet(f"color: {T['border']};"); return s
+
+        cl.addWidget(hr())
+        cl.addWidget(lbl(f"Order:   {self._order['order_no']}", True))
+        cl.addWidget(lbl(f"Date:    {self._order.get('created_at', now_str())[:19]}",
                          color=T['text_muted']))
         cl.addWidget(lbl(f"Cashier: {self._order.get('username', '—')}",
                          color=T['text_muted']))
         cl.addSpacing(6)
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet(f"color: {T['border']};"); cl.addWidget(sep2)
+        cl.addWidget(hr())
 
         for item in self._items:
             row = QHBoxLayout()
@@ -113,16 +136,13 @@ class ReceiptDialog(QDialog):
             subtot = QLabel(format_currency(item['subtotal']))
             subtot.setStyleSheet("font-size: 12px; font-weight: 600;")
             subtot.setAlignment(Qt.AlignmentFlag.AlignRight)
-            row.addWidget(name_l)
-            row.addWidget(subtot)
+            row.addWidget(name_l); row.addWidget(subtot)
             cl.addLayout(row)
-            unit_l = QLabel(f"  @ {format_currency(item['price'])}")
-            unit_l.setStyleSheet(f"font-size: 11px; color: {T['text_muted']};")
-            cl.addWidget(unit_l)
+            cl.addWidget(lbl(f"  @ {format_currency(item['price'])}",
+                             color=T['text_muted'], size=11))
 
         cl.addSpacing(6)
-        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
-        sep3.setStyleSheet(f"color: {T['border']};"); cl.addWidget(sep3)
+        cl.addWidget(hr())
 
         def total_row(label, value, bold=False, color=None):
             row = QHBoxLayout()
@@ -140,10 +160,10 @@ class ReceiptDialog(QDialog):
         total_row("Subtotal:", self._order['subtotal'])
         if self._order['discount'] > 0:
             total_row("Discount:", -self._order['discount'], color=T['warning'])
-        total_row("Tax:", self._order['tax'])
-        total_row("TOTAL:", self._order['total'], True)
-        total_row("Payment:", self._order['payment'])
-        total_row("Change:", self._order['change_due'], color=T['info'])
+        total_row("Tax:",      self._order['tax'])
+        total_row("TOTAL:",    self._order['total'], True)
+        total_row("Payment:",  self._order['payment'])
+        total_row("Change:",   self._order['change_due'], color=T['info'])
         cl.addWidget(lbl(f"Method: {self._order['pay_method'].upper()}",
                          color=T['text_muted']))
         cl.addSpacing(14)
@@ -153,42 +173,83 @@ class ReceiptDialog(QDialog):
         scroll.setWidget(content)
         layout.addWidget(scroll)
 
+        # ── Separator ─────────────────────────────────────────────────────────
+        sep_frame = QFrame()
+        sep_frame.setFrameShape(QFrame.Shape.HLine)
+        sep_frame.setStyleSheet(f"color: {T['border']};")
+        layout.addWidget(sep_frame)
+
+        # ── Button row ────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(16, 8, 16, 16)
+        btn_row.setContentsMargins(16, 10, 16, 14)
+        btn_row.setSpacing(8)
+
         print_btn = QPushButton("🖨  Print")
-        print_btn.setObjectName("primary")
+        print_btn.setObjectName("ghost")
+        print_btn.setFixedHeight(36)
         print_btn.clicked.connect(self._print_receipt)
+
         pdf_btn = QPushButton("📄  Save PDF")
-        pdf_btn.setObjectName("ghost")
+        pdf_btn.setObjectName("primary")
+        pdf_btn.setFixedHeight(36)
         pdf_btn.clicked.connect(self._save_pdf)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
+
+        txt_btn = QPushButton("💾  Save TXT")
+        txt_btn.setObjectName("ghost")
+        txt_btn.setFixedHeight(36)
+        txt_btn.clicked.connect(self._save_txt)
+
+        # Cancel always just closes the receipt — never clears the cart.
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setObjectName("ghost")
+        self._cancel_btn.setFixedHeight(36)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+
         btn_row.addWidget(print_btn)
         btn_row.addWidget(pdf_btn)
+        btn_row.addWidget(txt_btn)
         btn_row.addStretch()
-        btn_row.addWidget(close_btn)
+        btn_row.addWidget(self._cancel_btn)
         layout.addLayout(btn_row)
 
+        # ── Status label (shows save confirmation inline) ──────────────────────
+        self._status_lbl = QLabel("")
+        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_lbl.setStyleSheet(
+            f"color: {T['success']}; font-size: 11px; padding: 0 16px 6px;")
+        self._status_lbl.setWordWrap(True)
+        layout.addWidget(self._status_lbl)
+
+    # ── Receipt text ──────────────────────────────────────────────────────────
     def _receipt_text(self) -> str:
-        lines = ["=" * 38, "         NEXUS POS SYSTEM", "=" * 38,
-                 f"Order: {self._order['order_no']}",
-                 f"Date:  {self._order.get('created_at', now_str())[:19]}",
-                 f"Cashier: {self._order.get('username', '—')}", "-" * 38]
+        lines = ["=" * 40, "          NEXUS POS SYSTEM", "=" * 40,
+                 f"Order:   {self._order['order_no']}",
+                 f"Date:    {self._order.get('created_at', now_str())[:19]}",
+                 f"Cashier: {self._order.get('username', '—')}",
+                 f"Method:  {self._order.get('pay_method', '').upper()}",
+                 "-" * 40]
         for item in self._items:
-            lines.append(f"{item['name'][:20]:<20} ×{item['qty']}")
-            lines.append(f"  @ {format_currency(item['price'])} = {format_currency(item['subtotal'])}")
-        lines += ["-" * 38,
-                  f"Subtotal: {format_currency(self._order['subtotal']):>12}",
-                  f"Discount: {format_currency(self._order['discount']):>12}",
-                  f"Tax:      {format_currency(self._order['tax']):>12}",
-                  f"TOTAL:    {format_currency(self._order['total']):>12}",
-                  f"Payment:  {format_currency(self._order['payment']):>12}",
-                  f"Change:   {format_currency(self._order['change_due']):>12}",
-                  "=" * 38, "   Thank you for your purchase!", "=" * 38]
+            lines.append(f"  {item['name'][:24]:<24} x{item['qty']}")
+            lines.append(f"  @ {format_currency(item['price'])} = "
+                         f"{format_currency(item['subtotal'])}")
+        lines += ["-" * 40,
+                  f"  Subtotal : {format_currency(self._order['subtotal']):>10}",
+                  f"  Discount : {format_currency(self._order['discount']):>10}",
+                  f"  Tax      : {format_currency(self._order['tax']):>10}",
+                  f"  TOTAL    : {format_currency(self._order['total']):>10}",
+                  f"  Payment  : {format_currency(self._order['payment']):>10}",
+                  f"  Change   : {format_currency(self._order['change_due']):>10}",
+                  "=" * 40, "    Thank you for your purchase!", "=" * 40]
         return "\n".join(lines)
 
+    # ── Actions ───────────────────────────────────────────────────────────────
+    def _mark_saved(self, path: str):
+        self._status_lbl.setText(f"✓  Saved: {path}")
+
+    def _on_cancel(self):
+        self.reject()
+
     def _print_receipt(self):
-        """FIX: use QPageSize instead of deprecated QPrinter.PageSize enum."""
         try:
             from PySide6.QtPrintSupport import QPrinter, QPrintDialog
             from PySide6.QtGui import QTextDocument, QPageSize
@@ -204,26 +265,24 @@ class ReceiptDialog(QDialog):
 
     def _save_pdf(self):
         try:
-            from reportlab.lib.pagesizes import A6
-            from reportlab.platypus import SimpleDocTemplate, Paragraph
-            from reportlab.lib.styles import getSampleStyleSheet
-            from PySide6.QtWidgets import QFileDialog
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Receipt PDF",
-                f"receipt_{self._order['order_no']}.pdf", "PDF Files (*.pdf)")
-            if not path:
-                return
-            doc = SimpleDocTemplate(path, pagesize=A6)
-            styles = getSampleStyleSheet()
-            story = [Paragraph(line.replace(" ", "&nbsp;"), styles['Code'])
-                     for line in self._receipt_text().split("\n")]
-            doc.build(story)
-            QMessageBox.information(self, "Saved", f"Receipt saved to:\n{path}")
-        except ImportError:
-            QMessageBox.warning(self, "Missing library",
-                                "Install reportlab:\npip install reportlab")
+            saved = save_order_pdf(self._order, self._items)
+            if saved:
+                self._mark_saved("Save Receipt as PDF")
+            else:
+                QMessageBox.warning(
+                    self, "Missing Library",
+                    "reportlab is not installed.\n\n"
+                    "Run:  pip install reportlab")
         except Exception as e:
             QMessageBox.critical(self, "PDF Error", str(e))
+
+    def _save_txt(self):
+        try:
+            save_order_txt(self._order, self._items)
+            self._mark_saved("Save Receipt as TXT")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+
 
 
 # ─── POS Tab ───────────────────────────────────────────────────────────────────
@@ -297,9 +356,8 @@ class PosTab(QWidget):
         order_hdr.addWidget(self.order_no_lbl)
         rl.addLayout(order_hdr)
 
-        # Cart table
-        # FIX: connect cellDoubleClicked ONCE here, not inside _refresh_cart
-        self.cart_table = QTableWidget()
+        # Cart table — ThemedTable auto-updates colours on theme toggle
+        self.cart_table = ThemedTable()
         self.cart_table.setColumnCount(5)
         self.cart_table.setHorizontalHeaderLabels(["Product", "Price", "Qty", "Subtotal", ""])
         self.cart_table.verticalHeader().setVisible(False)
@@ -308,8 +366,6 @@ class PosTab(QWidget):
         self.cart_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cart_table.setAlternatingRowColors(True)
         self.cart_table.setShowGrid(True)
-        self.cart_table.setStyleSheet(
-            f"QTableWidget {{ alternate-background-color: {T['surface2']}; }}")
 
         ch = self.cart_table.horizontalHeader()
         ch.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -622,17 +678,18 @@ class PosTab(QWidget):
         order, items = OrderQueries.get_by_id(order_id)
         order_dict   = dict(order)
         order_dict['username'] = self._user['username']
+        item_dicts = [dict(i) for i in items]
 
-        receipt = ReceiptDialog(order_dict, [dict(i) for i in items], self)
-        receipt.exec()
+        receipt = ReceiptDialog(order_dict, item_dicts, self)
+        receipt.exec()  # result ignored — cart behaviour is always the same
 
-        # Reset cart
+        # Order is committed to DB. Clear cart and prepare next order.
+        # The receipt dialog's Cancel button only closes the dialog window;
+        # it does NOT undo the sale or affect the cart reset below.
         self._cart.clear()
         self.discount_spin.setValue(0)
         self.payment_spin.setValue(0)
         self._refresh_cart()
         self._update_order_no()
         self._load_products()
-
-        # FIX: emit AFTER the receipt dialog closes so reports/dashboard refresh correctly
         self.order_completed.emit()

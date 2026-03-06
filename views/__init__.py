@@ -1,5 +1,5 @@
 from .login import LoginDialog
-from views.main_window import MainWindow
+from .main_window import MainWindow
 from .dashboard import DashboardTab
 from .pos import PosTab
 from .inventory import InventoryTab

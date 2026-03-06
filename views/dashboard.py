@@ -8,19 +8,16 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QColor
 from database import ReportQueries, ProductQueries
 from utils import format_currency, short_date
-from utils.theme import THEME as T
+from utils.theme import ThemeManager as _TM
+T = _TM().palette
 from widgets import StatCard, SectionTitle, SectionSubtitle, Divider, WeeklyBarChart
+from widgets.base import ThemedTable
 
 
-def _make_inner_table(cols: list[str], col_widths: list[int] | None = None) -> QTableWidget:
-    """Compact table for use inside cards."""
+def _make_inner_table(cols: list[str], col_widths: list[int] | None = None):
+    """Compact table for use inside dashboard cards — auto-themed."""
     from widgets.base import styled_table
-    tbl = styled_table(cols, col_widths=col_widths)
-    tbl.setStyleSheet(
-        f"QTableWidget {{ alternate-background-color: {T['surface3']}; "
-        f"background-color: {T['surface2']}; border: none; }}"
-    )
-    return tbl
+    return styled_table(cols, col_widths=col_widths)
 
 
 class DashboardTab(QWidget):

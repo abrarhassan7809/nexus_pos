@@ -9,7 +9,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from database import UserQueries
 from utils import hash_pw, short_date
-from utils.theme import THEME as T
+from utils.theme import ThemeManager as _TM
+T = _TM().palette
 from widgets import styled_table, make_table_item, SectionTitle
 
 

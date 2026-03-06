@@ -8,7 +8,8 @@ from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QColor
 from database import ReportQueries
 from utils import format_currency, today_str
-from utils.theme import THEME as T
+from utils.theme import ThemeManager as _TM
+T = _TM().palette
 from widgets import (SectionTitle, StatCard, Divider,
                      WeeklyBarChart, TopProductsChart,
                      styled_table, make_table_item)

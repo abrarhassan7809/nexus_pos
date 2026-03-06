@@ -1,8 +1,13 @@
 from __future__ import annotations
 from PySide6.QtWidgets import QWidget, QSizePolicy
-from PySide6.QtCore import Qt, QRect, QPoint
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QBrush, QLinearGradient, QPainterPath
-from utils.theme import THEME as T
+
+
+def _T():
+    """Always returns the live palette so charts repaint correctly after theme switch."""
+    from utils.theme import ThemeManager
+    return ThemeManager().palette
 
 
 class WeeklyBarChart(QWidget):
@@ -19,6 +24,7 @@ class WeeklyBarChart(QWidget):
     def paintEvent(self, event):
         if not self._data:
             return
+        T = _T()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -28,11 +34,8 @@ class WeeklyBarChart(QWidget):
         chart_h = H - pad_t - pad_b
 
         max_val = max(v for _, v in self._data) or 1
-
-        # Background
         p.fillRect(0, 0, W, H, QColor(T['surface']))
 
-        # Grid lines
         grid_pen = QPen(QColor(T['border']))
         grid_pen.setWidth(1)
         p.setPen(grid_pen)
@@ -56,24 +59,19 @@ class WeeklyBarChart(QWidget):
             bar_h = int(chart_h * value / max_val) if max_val else 0
             y = pad_t + chart_h - bar_h
 
-            # Gradient bar
             grad = QLinearGradient(x, y, x, y + bar_h)
             grad.setColorAt(0, QColor(T['accent']))
             grad.setColorAt(1, QColor(T['accent_light']))
             path = QPainterPath()
-            radius = 4
-            path.addRoundedRect(x, y, bar_w, bar_h, radius, radius)
+            path.addRoundedRect(x, y, bar_w, bar_h, 4, 4)
             p.fillPath(path, QBrush(grad))
 
-            # Value label on top
             p.setPen(QColor(T['text_muted']))
             fnt2 = QFont(); fnt2.setPointSize(8)
             p.setFont(fnt2)
             p.drawText(x - 10, y - 14, bar_w + 20, 14,
-                       Qt.AlignmentFlag.AlignHCenter, f"${value:,.0f}" if value >= 1 else "")
-
-            # X-axis label
-            p.setPen(QColor(T['text_muted']))
+                       Qt.AlignmentFlag.AlignHCenter,
+                       f"${value:,.0f}" if value >= 1 else "")
             p.drawText(x - 10, H - pad_b + 6, bar_w + 20, 20,
                        Qt.AlignmentFlag.AlignHCenter, label[-5:])
 
@@ -94,6 +92,7 @@ class TopProductsChart(QWidget):
     def paintEvent(self, event):
         if not self._data:
             return
+        T = _T()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
@@ -112,7 +111,6 @@ class TopProductsChart(QWidget):
             bar_h = max(8, row_h - 14)
             bar_w = int((W - pad_l - pad_r) * value / max_val)
 
-            # Name
             p.setPen(QColor(T['text']))
             fnt = QFont(); fnt.setPointSize(9)
             p.setFont(fnt)
@@ -120,16 +118,13 @@ class TopProductsChart(QWidget):
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        name[:22])
 
-            # Bar
             color = COLORS[i % len(COLORS)]
             path = QPainterPath()
             path.addRoundedRect(pad_l, y + (row_h - bar_h) // 2, bar_w, bar_h, 3, 3)
             p.fillPath(path, QColor(color))
 
-            # Value
             p.setPen(QColor(T['text_muted']))
             p.drawText(pad_l + bar_w + 6, y + (row_h - 16) // 2, 70, 16,
-                       Qt.AlignmentFlag.AlignLeft,
-                       f"${value:,.0f}")
+                       Qt.AlignmentFlag.AlignLeft, f"${value:,.0f}")
 
         p.end()

@@ -5,7 +5,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
-from utils.theme import THEME as T
+from utils.theme import ThemeManager as _TM
+
+
+def _T() -> dict:
+    """Always returns the live palette — never a stale snapshot."""
+    return _TM().palette
 
 
 class SectionTitle(QLabel):
@@ -28,8 +33,13 @@ class Divider(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.HLine)
-        self.setStyleSheet(f"color: {T['border']}; background: {T['border']};")
+        self._refresh_style()
         self.setFixedHeight(1)
+        _TM().theme_changed.connect(lambda _: self._refresh_style())
+
+    def _refresh_style(self):
+        T = _T()
+        self.setStyleSheet(f"color: {T['border']}; background: {T['border']};")
 
 
 class StatCard(QFrame):
@@ -37,6 +47,7 @@ class StatCard(QFrame):
                  icon: str = "", parent=None):
         super().__init__(parent)
         self.setObjectName("card")
+        self._color = color
         self.setMinimumWidth(120)
         self.setMinimumHeight(90)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -48,10 +59,9 @@ class StatCard(QFrame):
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
         if icon:
-            icon_lbl = QLabel(icon)
-            icon_lbl.setStyleSheet(f"font-size: 16px; color: {color or T['accent']};")
-            icon_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            top_row.addWidget(icon_lbl)
+            self._icon_lbl = QLabel(icon)
+            self._icon_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            top_row.addWidget(self._icon_lbl)
         title_lbl = QLabel(title.upper())
         title_lbl.setObjectName("section")
         title_lbl.setWordWrap(True)
@@ -60,29 +70,81 @@ class StatCard(QFrame):
         layout.addLayout(top_row)
 
         self.value_label = QLabel(value)
-        self.value_label.setStyleSheet(
-            f"font-size: 22px; font-weight: 700; color: {color or T['text']};"
-        )
         self.value_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(self.value_label)
 
         if color:
-            accent_bar = QFrame()
-            accent_bar.setFixedHeight(3)
-            accent_bar.setStyleSheet(f"background: {color}; border-radius: 2px;")
-            layout.addWidget(accent_bar)
+            self._accent_bar = QFrame()
+            self._accent_bar.setFixedHeight(3)
+            self._accent_bar.setStyleSheet(f"background: {color}; border-radius: 2px;")
+            layout.addWidget(self._accent_bar)
+
+        self._refresh_style()
+        _TM().theme_changed.connect(lambda _: self._refresh_style())
+
+    def _refresh_style(self):
+        T = _T()
+        color = self._color
+        if hasattr(self, '_icon_lbl'):
+            self._icon_lbl.setStyleSheet(
+                f"font-size: 16px; color: {color or T['accent']}; background: transparent;")
+        self.value_label.setStyleSheet(
+            f"font-size: 22px; font-weight: 700; color: {color or T['text']}; background: transparent;")
 
     def set_value(self, v: str):
         self.value_label.setText(v)
 
 
+class ThemedTable(QTableWidget):
+    """
+    QTableWidget that re-applies its inline alternate-row stylesheet
+    whenever the global theme changes, so it stays in sync.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._refresh_table_style()
+        _TM().theme_changed.connect(lambda _: self._refresh_table_style())
+
+    def _refresh_table_style(self):
+        T = _T()
+        self.setStyleSheet(
+            f"QTableWidget {{"
+            f"  alternate-background-color: {T['surface2']};"
+            f"  background-color: {T['surface']};"
+            f"  color: {T['text']};"
+            f"  gridline-color: {T['surface3']};"
+            f"  border: 1px solid {T['border']};"
+            f"  border-radius: 8px;"
+            f"}}"
+            f"QTableWidget::item {{"
+            f"  padding: 6px 10px;"
+            f"  border: none;"
+            f"  color: {T['text']};"
+            f"}}"
+            f"QTableWidget::item:selected {{"
+            f"  background-color: {T['accent_light']};"
+            f"  color: {T['text']};"
+            f"}}"
+            f"QHeaderView::section {{"
+            f"  background-color: {T['surface2']};"
+            f"  color: {T['text_muted']};"
+            f"  font-size: 11px; font-weight: 700; letter-spacing: 1px;"
+            f"  padding: 8px 10px;"
+            f"  border: none;"
+            f"  border-right: 1px solid {T['border']};"
+            f"  border-bottom: 1px solid {T['border']};"
+            f"}}"
+        )
+
+
 def styled_table(columns: list[str], col_widths: list[int] | None = None,
-                 stretch_col: int = -1) -> QTableWidget:
+                 stretch_col: int = -1) -> ThemedTable:
     """
-    col_widths : pixel width for each column (Fixed mode); None columns use ResizeToContents.
-    stretch_col: column index that fills remaining space (-1 = last column).
+    Returns a ThemedTable that automatically re-styles on theme change.
+    col_widths : pixel width per column (Fixed); None = ResizeToContents.
+    stretch_col: column that fills remaining space (-1 = last).
     """
-    tbl = QTableWidget()
+    tbl = ThemedTable()
     tbl.setColumnCount(len(columns))
     tbl.setHorizontalHeaderLabels(columns)
 
@@ -96,10 +158,6 @@ def styled_table(columns: list[str], col_widths: list[int] | None = None,
     tbl.setAlternatingRowColors(True)
     tbl.setShowGrid(True)
     tbl.setWordWrap(False)
-    tbl.setStyleSheet(
-        f"QTableWidget {{ alternate-background-color: {T['surface2']}; "
-        f"background-color: {T['surface']}; }}"
-    )
 
     hdr = tbl.horizontalHeader()
     hdr.setHighlightSections(False)
