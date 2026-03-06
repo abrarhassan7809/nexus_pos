@@ -81,25 +81,13 @@ INSERT OR IGNORE INTO categories (name) VALUES
 INSERT OR IGNORE INTO products (sku, name, category_id, price, cost, stock, low_stock, unit)
 VALUES
   ('BEV001','Coca-Cola 1.5L',       1, 2.50, 1.20, 120, 20, 'btl'),
-  ('BEV002','Mineral Water 500ml',  1, 0.80, 0.30, 200, 30, 'btl'),
-  ('BEV003','Orange Juice 1L',      1, 3.20, 1.80, 80,  15, 'btl'),
-  ('BEV004','Energy Drink 250ml',   1, 2.00, 0.90, 60,  10, 'can'),
+  ('BEV001','Energy Drink 250ml',   1, 2.00, 0.90, 60,  10, 'can'),
   ('SNK001','Potato Chips 100g',    2, 1.50, 0.70, 150, 25, 'pck'),
-  ('SNK002','Chocolate Bar 50g',    2, 1.20, 0.55, 100, 20, 'pcs'),
-  ('SNK003','Crackers 200g',        2, 2.00, 0.95, 90,  15, 'pck'),
-  ('DAI001','Fresh Milk 1L',        3, 2.80, 1.60, 60,  15, 'btl'),
-  ('DAI002','Yogurt 200g',          3, 1.80, 0.90, 45,  10, 'cup'),
-  ('DAI003','Cheddar Cheese 200g',  3, 4.50, 2.50, 30,  8,  'pck'),
-  ('BAK001','White Bread Loaf',     4, 2.20, 1.00, 40,  10, 'pcs'),
-  ('BAK002','Croissant',            4, 1.50, 0.70, 25,  8,  'pcs'),
+  ('SNK001','Chocolate Bar 50g',    2, 1.20, 0.55, 100, 20, 'pcs'),
+  ('DAI001','Yogurt 200g',          3, 1.80, 0.90, 45,  10, 'cup'),
   ('CAN001','Tuna Can 185g',        5, 1.80, 0.85, 80,  15, 'can'),
-  ('CAN002','Tomato Sauce 400g',    5, 1.40, 0.65, 70,  15, 'can'),
-  ('PER001','Shampoo 200ml',        6, 3.50, 1.80, 50,  10, 'btl'),
-  ('PER002','Soap Bar 100g',        6, 1.00, 0.45, 100, 20, 'pcs'),
-  ('CLN001','Dish Soap 500ml',      7, 2.50, 1.20, 55,  10, 'btl'),
   ('FRZ001','Ice Cream 500ml',      8, 4.00, 2.00, 30,  8,  'tub'),
-  ('PRD001','Banana 1kg',           9, 1.20, 0.60, 80,  15, 'kg'),
-  ('PRD002','Apple 1kg',            9, 2.50, 1.30, 60,  12, 'kg');
+  ('PRD001','Apple 1kg',            9, 2.50, 1.30, 60,  12, 'kg');
 """
 
 
@@ -118,7 +106,7 @@ def init_db():
             )
             conn.execute(
                 "INSERT OR IGNORE INTO users (username, password, role, full_name) VALUES (?,?,?,?)",
-                ("cashier1", _hash("admin123"), "cashier", "Jane Cashier")
+                ("cashier", _hash("admin123"), "cashier", "Jane Cashier")
             )
 
         conn.commit()
