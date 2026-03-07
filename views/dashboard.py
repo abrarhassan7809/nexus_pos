@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QColor
-from database import ReportQueries, ProductQueries
+from database import ReportQueries, ProductQueries, ExpenseQueries
 from utils import format_currency, short_date
 from utils.theme import ThemeManager as _TM
 T = _TM().palette
@@ -71,6 +71,17 @@ class DashboardTab(QWidget):
                   self.card_low, self.card_products]:
             cards_row.addWidget(c)
         main.addLayout(cards_row)
+
+        # ── Budget / Expense stat cards ────────────────────────────────────────
+        budget_row = QHBoxLayout()
+        budget_row.setSpacing(10)
+        self.card_budget   = StatCard("Current Budget",    "—", T['accent'],  "💰")
+        self.card_month_exp= StatCard("Monthly Expenses",  "—", T['danger'],  "📉")
+        self.card_net      = StatCard("Net (Sales−Exp)",   "—", T['success'], "📊")
+        for c in [self.card_budget, self.card_month_exp, self.card_net]:
+            budget_row.addWidget(c)
+        budget_row.addStretch()
+        main.addLayout(budget_row)
 
         # ── Charts row ─────────────────────────────────────────────────────────
         charts_row = QHBoxLayout()
@@ -180,6 +191,17 @@ class DashboardTab(QWidget):
             min_item = QTableWidgetItem(str(r['low_stock']))
             min_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
             self.low_table.setItem(i, 2, min_item)
+
+        # Budget / Expense cards
+        exp_stats = ExpenseQueries.dashboard_stats()
+        budget = exp_stats['budget']
+        month_exp = exp_stats['month_exp']
+        self.card_budget.set_value(format_currency(budget))
+        self.card_budget.set_accent(T['success'] if budget >= 0 else T['danger'])
+        self.card_month_exp.set_value(format_currency(month_exp))
+        net = stats['month_sales'] - month_exp
+        self.card_net.set_value(format_currency(net))
+        self.card_net.set_accent(T['success'] if net >= 0 else T['danger'])
 
         # Recent orders
         from database import OrderQueries

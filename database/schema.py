@@ -96,6 +96,8 @@ def init_db():
     try:
         conn.executescript(SCHEMA_SQL)
         conn.executescript(SEED_CATEGORIES_PRODUCTS_SQL)
+        conn.executescript(EXPENSE_SCHEMA_SQL)
+        conn.executescript(EXPENSE_SEED_SQL)
 
         # Seed default users with properly hashed passwords (only if not already present)
         existing = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -112,3 +114,45 @@ def init_db():
         conn.commit()
     finally:
         conn.close()
+
+
+# ─── Expense tables (appended) ────────────────────────────────────────────────
+EXPENSE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS expense_categories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL UNIQUE,
+    color      TEXT    NOT NULL DEFAULT '#6C63FF',
+    icon       TEXT    NOT NULL DEFAULT '💸',
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS expenses (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL REFERENCES expense_categories(id),
+    title       TEXT    NOT NULL,
+    amount      REAL    NOT NULL DEFAULT 0,
+    type        TEXT    NOT NULL DEFAULT 'expense',  -- 'expense' | 'budget_add' | 'budget_sub'
+    note        TEXT    NOT NULL DEFAULT '',
+    user_id     INTEGER REFERENCES users(id),
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS budget (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),  -- singleton row
+    balance    REAL    NOT NULL DEFAULT 0,
+    updated_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO budget (id, balance) VALUES (1, 0);
+"""
+
+EXPENSE_SEED_SQL = """
+INSERT OR IGNORE INTO expense_categories (name, color, icon) VALUES
+    ('Rent',        '#EF4444', '🏠'),
+    ('Utilities',   '#F59E0B', '💡'),
+    ('Supplies',    '#6C63FF', '📦'),
+    ('Salaries',    '#3B82F6', '👤'),
+    ('Marketing',   '#22C55E', '📣'),
+    ('Maintenance', '#F97316', '🔧'),
+    ('Other',       '#8B5CF6', '💸');
+"""

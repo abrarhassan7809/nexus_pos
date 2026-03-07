@@ -405,3 +405,192 @@ class ReportQueries:
             }
         finally:
             conn.close()
+
+
+# ──────────────────────────── EXPENSE QUERIES ─────────────────────────────────
+class ExpenseQueries:
+
+    # ── Categories ─────────────────────────────────────────────────────────────
+    @staticmethod
+    def get_categories():
+        conn = get_db()
+        try:
+            return conn.execute(
+                "SELECT * FROM expense_categories ORDER BY name"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def create_category(name: str, color: str, icon: str):
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO expense_categories (name, color, icon) VALUES (?,?,?)",
+                (name, color, icon)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def update_category(cat_id: int, name: str, color: str, icon: str):
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE expense_categories SET name=?, color=?, icon=? WHERE id=?",
+                (name, color, icon, cat_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def delete_category(cat_id: int):
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM expense_categories WHERE id=?", (cat_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ── Expenses ───────────────────────────────────────────────────────────────
+    @staticmethod
+    def get_all(date_from: str = None, date_to: str = None,
+                category_id: int = None) -> list:
+        conn = get_db()
+        try:
+            q = """SELECT e.*, ec.name as cat_name, ec.color as cat_color,
+                          ec.icon as cat_icon, u.username
+                   FROM expenses e
+                   LEFT JOIN expense_categories ec ON e.category_id = ec.id
+                   LEFT JOIN users u ON e.user_id = u.id
+                   WHERE 1=1"""
+            params = []
+            if date_from:
+                q += " AND date(e.created_at) >= ?"; params.append(date_from)
+            if date_to:
+                q += " AND date(e.created_at) <= ?"; params.append(date_to)
+            if category_id:
+                q += " AND e.category_id = ?"; params.append(category_id)
+            q += " ORDER BY e.created_at DESC"
+            return conn.execute(q, params).fetchall()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def create(category_id: int, title: str, amount: float,
+               type_: str, note: str, user_id: int):
+        conn = get_db()
+        try:
+            conn.execute(
+                """INSERT INTO expenses (category_id, title, amount, type, note, user_id)
+                   VALUES (?,?,?,?,?,?)""",
+                (category_id, title, amount, type_, note, user_id)
+            )
+            # Update budget balance
+            if type_ == 'budget_add':
+                conn.execute(
+                    "UPDATE budget SET balance = balance + ?, updated_at = datetime('now') WHERE id=1",
+                    (amount,)
+                )
+            elif type_ == 'budget_sub':
+                conn.execute(
+                    "UPDATE budget SET balance = balance - ?, updated_at = datetime('now') WHERE id=1",
+                    (amount,)
+                )
+            elif type_ == 'expense':
+                conn.execute(
+                    "UPDATE budget SET balance = balance - ?, updated_at = datetime('now') WHERE id=1",
+                    (amount,)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def delete(expense_id: int):
+        """Reverse the budget effect then delete the record."""
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT amount, type FROM expenses WHERE id=?", (expense_id,)
+            ).fetchone()
+            if row:
+                amt, typ = row['amount'], row['type']
+                # Reverse
+                if typ == 'budget_add':
+                    conn.execute(
+                        "UPDATE budget SET balance = balance - ?, updated_at = datetime('now') WHERE id=1",
+                        (amt,)
+                    )
+                elif typ in ('budget_sub', 'expense'):
+                    conn.execute(
+                        "UPDATE budget SET balance = balance + ?, updated_at = datetime('now') WHERE id=1",
+                        (amt,)
+                    )
+                conn.execute("DELETE FROM expenses WHERE id=?", (expense_id,))
+                conn.commit()
+        finally:
+            conn.close()
+
+    # ── Budget ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def get_budget() -> float:
+        conn = get_db()
+        try:
+            row = conn.execute("SELECT balance FROM budget WHERE id=1").fetchone()
+            return row['balance'] if row else 0.0
+        finally:
+            conn.close()
+
+    # ── Dashboard stats ────────────────────────────────────────────────────────
+    @staticmethod
+    def dashboard_stats() -> dict:
+        conn = get_db()
+        try:
+            budget = conn.execute(
+                "SELECT balance FROM budget WHERE id=1"
+            ).fetchone()
+            today_exp = conn.execute(
+                """SELECT COALESCE(SUM(amount),0) as total
+                   FROM expenses WHERE type='expense'
+                   AND date(created_at)=date('now')"""
+            ).fetchone()
+            month_exp = conn.execute(
+                """SELECT COALESCE(SUM(amount),0) as total
+                   FROM expenses WHERE type='expense'
+                   AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')"""
+            ).fetchone()
+            by_cat = conn.execute(
+                """SELECT ec.name, ec.color, ec.icon,
+                          COALESCE(SUM(e.amount),0) as total
+                   FROM expense_categories ec
+                   LEFT JOIN expenses e ON e.category_id=ec.id
+                       AND e.type='expense'
+                       AND strftime('%Y-%m',e.created_at)=strftime('%Y-%m','now')
+                   GROUP BY ec.id ORDER BY total DESC"""
+            ).fetchall()
+            return {
+                'budget':    budget['balance'] if budget else 0.0,
+                'today_exp': today_exp['total'],
+                'month_exp': month_exp['total'],
+                'by_cat':    [dict(r) for r in by_cat],
+            }
+        finally:
+            conn.close()
+
+    @staticmethod
+    def monthly_expense_summary():
+        conn = get_db()
+        try:
+            return conn.execute(
+                """SELECT strftime('%Y-%m', created_at) as month,
+                          COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0) as expenses,
+                          COALESCE(SUM(CASE WHEN type='budget_add' THEN amount ELSE 0 END),0) as added,
+                          COALESCE(SUM(CASE WHEN type='budget_sub' THEN amount ELSE 0 END),0) as subtracted
+                   FROM expenses
+                   GROUP BY month ORDER BY month DESC LIMIT 12"""
+            ).fetchall()
+        finally:
+            conn.close()

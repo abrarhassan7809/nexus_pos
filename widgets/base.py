@@ -94,6 +94,13 @@ class StatCard(QFrame):
     def set_value(self, v: str):
         self.value_label.setText(v)
 
+    def set_accent(self, color: str):
+        """Dynamically change the accent color (icon, value text, bar)."""
+        self._color = color
+        self._refresh_style()
+        if hasattr(self, '_accent_bar'):
+            self._accent_bar.setStyleSheet(f"background: {color}; border-radius: 2px;")
+
 
 class ThemedTable(QTableWidget):
     """

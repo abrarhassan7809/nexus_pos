@@ -8,6 +8,12 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from utils.theme import ThemeManager
 from datetime import datetime
+from views.dashboard import DashboardTab
+from views.pos import PosTab
+from views.inventory import InventoryTab
+from views.sales import SalesTab
+from views.reports import ReportsTab
+from views.expenses import ExpensesTab
 
 
 class MainWindow(QMainWindow):
@@ -143,7 +149,7 @@ class MainWindow(QMainWindow):
         self._repaint_children(self.tabs)
 
         # Refresh data in each tab so item foreground colours update
-        for tab in [self.dashboard, self.inventory, self.sales, self.reports]:
+        for tab in [self.dashboard, self.inventory, self.sales, self.reports, self.expenses]:
             if hasattr(tab, 'refresh'):
                 tab.refresh()
 
@@ -153,23 +159,19 @@ class MainWindow(QMainWindow):
             child.update()
 
     def _add_tabs(self):
-        from views.dashboard  import DashboardTab
-        from views.pos        import PosTab
-        from views.inventory  import InventoryTab
-        from views.sales      import SalesTab
-        from views.reports    import ReportsTab
-
         self.dashboard  = DashboardTab(self._user)
         self.pos        = PosTab(self._user)
         self.inventory  = InventoryTab(self._user)
         self.sales      = SalesTab(self._user)
         self.reports    = ReportsTab(self._user)
+        self.expenses   = ExpensesTab(self._user)
 
         self.tabs.addTab(self.dashboard,  "📊  Dashboard")
         self.tabs.addTab(self.pos,        "🛒  Point of Sale")
         self.tabs.addTab(self.inventory,  "📦  Inventory")
         self.tabs.addTab(self.sales,      "🧾  Sales")
         self.tabs.addTab(self.reports,    "📈  Reports")
+        self.tabs.addTab(self.expenses,   "💸  Expenses")
 
         if self._is_admin:
             from views.users import UsersTab
@@ -181,6 +183,8 @@ class MainWindow(QMainWindow):
         self.pos.order_completed.connect(self.inventory.refresh)
         # Reload POS product grid when inventory changes (add/edit/delete/stock adjust)
         self.inventory.products_changed.connect(self.pos._load_products)
+        # Refresh dashboard when expenses/budget change
+        self.expenses.budget_changed.connect(self.dashboard.refresh)
 
     # ── Menu ───────────────────────────────────────────────────────────────────
     def _build_menu(self):
