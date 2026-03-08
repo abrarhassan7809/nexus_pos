@@ -2,12 +2,12 @@ from __future__ import annotations
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QDialog, QFormLayout, QLineEdit, QComboBox,
-    QDoubleSpinBox, QTextEdit, QMessageBox, QScrollArea,
-    QGridLayout, QSizePolicy, QDateEdit, QButtonGroup,
-    QRadioButton, QTableWidgetItem, QHeaderView, QColorDialog
+    QDoubleSpinBox, QMessageBox, QScrollArea,
+    QSizePolicy, QDateEdit, QTableWidgetItem, QHeaderView,
+    QColorDialog, QSplitter
 )
 from PySide6.QtCore import Qt, Signal, QDate
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor
 from database import ExpenseQueries
 from utils import format_currency, today_str, short_date
 from utils.theme import ThemeManager as _TM
@@ -17,38 +17,43 @@ def _T():
     return _TM().palette
 
 
-# ─── Category Dialog ───────────────────────────────────────────────────────────
-class CategoryDialog(QDialog):
+# ── Category Add/Edit Dialog ───────────────────────────────────────────────────
+class _CategoryDialog(QDialog):
     ICONS = ['💸','🏠','💡','📦','👤','📣','🔧','🍔','🚗','📱',
              '🏥','📚','✈️','🎯','💼','🛒','⚡','🔒','🎨','🖥️']
+    COLORS = ['#EF4444','#F59E0B','#6C63FF','#3B82F6','#22C55E',
+              '#F97316','#8B5CF6','#EC4899','#14B8A6','#64748B']
 
     def __init__(self, category=None, parent=None):
         super().__init__(parent)
-        self._cat  = category
-        self._color = category['color'] if category else '#6C63FF'
-        self.setWindowTitle("Edit Category" if category else "New Category")
-        self.setFixedSize(380, 320)
+        self._cat   = category
+        self._color = category['color'] if category else self.COLORS[0]
+        self.setWindowTitle("Edit Category" if category else "Add Category")
+        self.setFixedSize(400, 290)
         self._build()
 
     def _build(self):
         T = _T()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(14)
 
-        layout.addWidget(QLabel(
-            f"<b>{'Edit' if self._cat else 'New'} Expense Category</b>"))
+        title = QLabel("Edit Category" if self._cat else "New Expense Category")
+        title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(title)
 
         form = QFormLayout()
-        form.setSpacing(10)
+        form.setSpacing(12)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.name_input = QLineEdit(self._cat['name'] if self._cat else "")
-        self.name_input.setPlaceholderText("e.g. Rent, Utilities…")
-        form.addRow("Name *:", self.name_input)
+        self.name_input.setPlaceholderText("e.g. Rent, Electricity, Salaries…")
+        self.name_input.setFixedHeight(36)
+        form.addRow("Name:", self.name_input)
 
-        # Icon picker
         self.icon_combo = QComboBox()
+        self.icon_combo.setFixedHeight(36)
         for icon in self.ICONS:
             self.icon_combo.addItem(icon, icon)
         if self._cat:
@@ -57,190 +62,235 @@ class CategoryDialog(QDialog):
                 self.icon_combo.setCurrentIndex(idx)
         form.addRow("Icon:", self.icon_combo)
 
-        # Color picker button
         color_row = QHBoxLayout()
-        self._color_btn = QPushButton()
-        self._color_btn.setFixedSize(80, 28)
-        self._color_btn.clicked.connect(self._pick_color)
-        self._apply_color_btn()
-        self._color_label = QLabel(self._color)
-        self._color_label.setStyleSheet(f"color: {T['text_muted']}; font-size: 11px;")
-        color_row.addWidget(self._color_btn)
-        color_row.addWidget(self._color_label)
+        color_row.setSpacing(6)
+        self._color_btns = []
+        for hex_color in self.COLORS:
+            btn = QPushButton()
+            btn.setFixedSize(26, 26)
+            btn.setProperty("hex", hex_color)
+            btn.clicked.connect(lambda _, c=hex_color: self._select_color(c))
+            self._color_btns.append(btn)
+            color_row.addWidget(btn)
         color_row.addStretch()
+        custom_btn = QPushButton("…")
+        custom_btn.setFixedSize(26, 26)
+        custom_btn.setToolTip("Pick custom color")
+        custom_btn.clicked.connect(self._pick_custom)
+        color_row.addWidget(custom_btn)
         form.addRow("Color:", color_row)
         layout.addLayout(form)
+        self._refresh_swatches()
 
         layout.addStretch()
         btns = QHBoxLayout()
-        save = QPushButton("Save")
-        save.setObjectName("primary")
-        save.setFixedHeight(34)
-        save.clicked.connect(self._save)
         cancel = QPushButton("Cancel")
-        cancel.setFixedHeight(34)
+        cancel.setFixedHeight(36)
         cancel.clicked.connect(self.reject)
+        save = QPushButton("Save Category")
+        save.setObjectName("primary")
+        save.setFixedHeight(36)
+        save.clicked.connect(self._save)
         btns.addStretch()
         btns.addWidget(cancel)
         btns.addWidget(save)
         layout.addLayout(btns)
 
-    def _pick_color(self):
-        c = QColorDialog.getColor(QColor(self._color), self, "Pick Category Color")
+    def _select_color(self, color):
+        self._color = color
+        self._refresh_swatches()
+
+    def _pick_custom(self):
+        c = QColorDialog.getColor(QColor(self._color), self, "Pick Color")
         if c.isValid():
             self._color = c.name()
-            self._apply_color_btn()
-            self._color_label.setText(self._color)
+            self._refresh_swatches()
 
-    def _apply_color_btn(self):
-        self._color_btn.setStyleSheet(
-            f"QPushButton {{ background: {self._color}; border-radius: 4px; "
-            f"border: 1px solid #ffffff33; }}")
+    def _refresh_swatches(self):
+        for btn in self._color_btns:
+            hc = btn.property("hex")
+            selected = (hc == self._color)
+            border = "3px solid white" if selected else "2px solid transparent"
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {hc}; border-radius: 13px; border: {border}; }}")
 
     def _save(self):
         if not self.name_input.text().strip():
-            QMessageBox.warning(self, "Validation", "Category name is required.")
+            QMessageBox.warning(self, "Required", "Please enter a category name.")
             return
         self.accept()
 
-    def get_data(self) -> dict:
-        return {
-            'name':  self.name_input.text().strip(),
-            'icon':  self.icon_combo.currentData(),
-            'color': self._color,
-        }
+    def get_data(self):
+        return {'name': self.name_input.text().strip(),
+                'icon': self.icon_combo.currentData(),
+                'color': self._color}
 
 
-# ─── Add Expense / Budget Dialog ───────────────────────────────────────────────
-class AddExpenseDialog(QDialog):
+# ── Add Expense Dialog ─────────────────────────────────────────────────────────
+class _AddExpenseDialog(QDialog):
     def __init__(self, user, parent=None):
         super().__init__(parent)
         self._user = user
-        self.setWindowTitle("Add Expense / Budget Entry")
-        self.setMinimumWidth(440)
+        self.setWindowTitle("Record Expense")
+        self.setFixedSize(460, 320)
         self._build()
 
     def _build(self):
         T = _T()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setContentsMargins(28, 24, 28, 20)
         layout.setSpacing(14)
 
-        layout.addWidget(QLabel("<b>New Entry</b>"))
+        title = QLabel("Record New Expense")
+        title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(title)
 
-        # ── Type selector ──────────────────────────────────────────────────────
-        type_frame = QFrame()
-        type_frame.setStyleSheet(
-            f"QFrame {{ background: {T['surface2']}; border-radius: 8px; "
-            f"border: 1px solid {T['border']}; padding: 4px; }}")
-        type_row = QHBoxLayout(type_frame)
-        type_row.setSpacing(4)
-        type_row.setContentsMargins(6, 6, 6, 6)
-
-        self._type_group = QButtonGroup(self)
-        for label, value, color in [
-            ("💸  Expense",      "expense",    T['danger']),
-            ("➕  Add Budget",   "budget_add", T['success']),
-            ("➖  Sub Budget",   "budget_sub", T['warning']),
-        ]:
-            rb = QRadioButton(label)
-            rb.setProperty("type_value", value)
-            rb.setStyleSheet(f"""
-                QRadioButton {{ color: {T['text']}; font-size: 12px; padding: 6px 10px; }}
-                QRadioButton::indicator {{ width: 0; height: 0; }}
-                QRadioButton:checked {{ background: {color}33; border-radius: 6px;
-                                        color: {color}; font-weight: 700; }}
-            """)
-            self._type_group.addButton(rb)
-            type_row.addWidget(rb)
-            if value == "expense":
-                rb.setChecked(True)
-        layout.addWidget(type_frame)
+        sub = QLabel("This will be deducted from your available budget.")
+        sub.setStyleSheet(f"color: {T['text_muted']}; font-size: 12px;")
+        layout.addWidget(sub)
 
         form = QFormLayout()
-        form.setSpacing(10)
+        form.setSpacing(12)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        # Title
         self.title_input = QLineEdit()
         self.title_input.setPlaceholderText("e.g. Monthly Rent, Electricity Bill…")
-        self.title_input.setFixedHeight(34)
-        form.addRow("Title *:", self.title_input)
+        self.title_input.setFixedHeight(36)
+        form.addRow("Description:", self.title_input)
 
-        # Category
         self.cat_combo = QComboBox()
-        self.cat_combo.setFixedHeight(34)
-        self._load_categories()
-        form.addRow("Category *:", self.cat_combo)
+        self.cat_combo.setFixedHeight(36)
+        for c in ExpenseQueries.get_categories():
+            self.cat_combo.addItem(f"{c['icon']}  {c['name']}", c['id'])
+        form.addRow("Category:", self.cat_combo)
 
-        # Amount
         self.amount_spin = QDoubleSpinBox()
         self.amount_spin.setRange(0.01, 9_999_999)
         self.amount_spin.setDecimals(2)
         self.amount_spin.setValue(0.00)
-        self.amount_spin.setFixedHeight(34)
+        self.amount_spin.setFixedHeight(36)
         self.amount_spin.setPrefix("$ ")
-        form.addRow("Amount *:", self.amount_spin)
+        form.addRow("Amount:", self.amount_spin)
 
-        # Note
-        self.note_input = QTextEdit()
-        self.note_input.setPlaceholderText("Optional note or description…")
-        self.note_input.setFixedHeight(64)
+        self.note_input = QLineEdit()
+        self.note_input.setPlaceholderText("Optional note…")
+        self.note_input.setFixedHeight(36)
         form.addRow("Note:", self.note_input)
-
         layout.addLayout(form)
-        layout.addStretch()
 
+        layout.addStretch()
         btns = QHBoxLayout()
-        save = QPushButton("Add Entry")
-        save.setObjectName("primary")
-        save.setFixedHeight(36)
-        save.clicked.connect(self._save)
         cancel = QPushButton("Cancel")
-        cancel.setFixedHeight(36)
+        cancel.setFixedHeight(38)
         cancel.clicked.connect(self.reject)
+        save = QPushButton("💸  Record Expense")
+        save.setObjectName("danger")
+        save.setFixedHeight(38)
+        save.clicked.connect(self._save)
         btns.addStretch()
         btns.addWidget(cancel)
         btns.addWidget(save)
         layout.addLayout(btns)
 
-    def _load_categories(self):
-        self.cat_combo.clear()
-        for c in ExpenseQueries.get_categories():
-            self.cat_combo.addItem(f"{c['icon']}  {c['name']}", c['id'])
-
     def _save(self):
         if not self.title_input.text().strip():
-            QMessageBox.warning(self, "Validation", "Title is required.")
+            QMessageBox.warning(self, "Required", "Please enter a description.")
             return
         if self.amount_spin.value() <= 0:
-            QMessageBox.warning(self, "Validation", "Amount must be greater than 0.")
+            QMessageBox.warning(self, "Required", "Amount must be greater than zero.")
             return
         if self.cat_combo.currentData() is None:
-            QMessageBox.warning(self, "Validation", "Please select a category.")
+            QMessageBox.warning(self, "Required", "Please select a category.")
             return
         self.accept()
 
-    def get_type(self) -> str:
-        for btn in self._type_group.buttons():
-            if btn.isChecked():
-                return btn.property("type_value")
-        return "expense"
-
-    def get_data(self) -> dict:
-        return {
-            'category_id': self.cat_combo.currentData(),
-            'title':       self.title_input.text().strip(),
-            'amount':      self.amount_spin.value(),
-            'type_':       self.get_type(),
-            'note':        self.note_input.toPlainText().strip(),
-            'user_id':     self._user['id'],
-        }
+    def get_data(self):
+        return {'category_id': self.cat_combo.currentData(),
+                'title':       self.title_input.text().strip(),
+                'amount':      self.amount_spin.value(),
+                'type_':       'expense',
+                'note':        self.note_input.text().strip(),
+                'user_id':     self._user['id']}
 
 
-# ─── Expenses Tab ──────────────────────────────────────────────────────────────
+# ── Add Budget Dialog ──────────────────────────────────────────────────────────
+class _BudgetDialog(QDialog):
+    def __init__(self, user, current_balance, parent=None):
+        super().__init__(parent)
+        self._user    = user
+        self._balance = current_balance
+        self.setWindowTitle("Add Money to Budget")
+        self.setFixedSize(420, 260)
+        self._build()
+
+    def _build(self):
+        T = _T()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("Add Money to Budget")
+        title.setStyleSheet("font-size: 15px; font-weight: 700;")
+        layout.addWidget(title)
+
+        color = T['success'] if self._balance >= 0 else T['danger']
+        current = QLabel(f"Current balance:  {format_currency(self._balance)}")
+        current.setStyleSheet(f"font-size: 13px; color: {color}; font-weight: 600;")
+        layout.addWidget(current)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.amount_spin = QDoubleSpinBox()
+        self.amount_spin.setRange(0.01, 9_999_999)
+        self.amount_spin.setDecimals(2)
+        self.amount_spin.setFixedHeight(36)
+        self.amount_spin.setPrefix("$ ")
+        form.addRow("Amount:", self.amount_spin)
+
+        self.note_input = QLineEdit()
+        self.note_input.setPlaceholderText("e.g. Monthly budget, Initial capital…")
+        self.note_input.setFixedHeight(36)
+        form.addRow("Note:", self.note_input)
+        layout.addLayout(form)
+
+        layout.addStretch()
+        btns = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.setFixedHeight(38)
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("➕  Add to Budget")
+        save.setObjectName("primary")
+        save.setFixedHeight(38)
+        save.clicked.connect(self._save)
+        btns.addStretch()
+        btns.addWidget(cancel)
+        btns.addWidget(save)
+        layout.addLayout(btns)
+
+    def _save(self):
+        if self.amount_spin.value() <= 0:
+            QMessageBox.warning(self, "Required", "Amount must be greater than zero.")
+            return
+        self.accept()
+
+    def get_data(self):
+        cats = ExpenseQueries.get_categories()
+        cat_id = cats[-1]['id'] if cats else 1   # use last category (usually "Other")
+        return {'category_id': cat_id,
+                'title':       self.note_input.text().strip() or "Budget top-up",
+                'amount':      self.amount_spin.value(),
+                'type_':       'budget_add',
+                'note':        '',
+                'user_id':     self._user['id']}
+
+
+# ── Expenses Tab — main view ───────────────────────────────────────────────────
 class ExpensesTab(QWidget):
-    budget_changed = Signal()   # emitted when budget or expenses change
+    budget_changed = Signal()
 
     def __init__(self, user, parent=None):
         super().__init__(parent)
@@ -250,145 +300,144 @@ class ExpensesTab(QWidget):
 
     def _build_ui(self):
         T = _T()
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(14)
-
-        # ── Header ─────────────────────────────────────────────────────────────
+        # Header
         hdr = QHBoxLayout()
         hdr.addWidget(SectionTitle("Expense Manager"))
         hdr.addStretch()
-
-        cat_btn = QPushButton("🏷  Manage Categories")
-        cat_btn.setObjectName("ghost")
-        cat_btn.setFixedHeight(34)
-        cat_btn.clicked.connect(self._manage_categories)
-        hdr.addWidget(cat_btn)
-
-        add_btn = QPushButton("＋  Add Entry")
-        add_btn.setObjectName("primary")
-        add_btn.setFixedHeight(34)
-        add_btn.clicked.connect(self._add_entry)
+        budget_btn = QPushButton("➕  Add Budget")
+        budget_btn.setObjectName("primary")
+        budget_btn.setFixedHeight(36)
+        budget_btn.setToolTip("Top up your available business budget")
+        budget_btn.clicked.connect(self._add_budget)
+        hdr.addWidget(budget_btn)
+        add_btn = QPushButton("💸  Record Expense")
+        add_btn.setObjectName("danger")
+        add_btn.setFixedHeight(36)
+        add_btn.clicked.connect(self._add_expense)
         hdr.addWidget(add_btn)
-        layout.addLayout(hdr)
+        root.addLayout(hdr)
 
-        # ── Stat cards ─────────────────────────────────────────────────────────
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(10)
-        self.card_budget  = StatCard("Current Budget",    "—", T['accent'],  "💰")
-        self.card_today   = StatCard("Today's Expenses",  "—", T['danger'],  "📉")
-        self.card_month   = StatCard("This Month",        "—", T['warning'], "📅")
-        self.card_net     = StatCard("Net (Sales − Exp)", "—", T['success'], "📈")
+        # Stat cards
+        cards = QHBoxLayout()
+        cards.setSpacing(10)
+        self.card_budget = StatCard("Available Budget", "—", T['accent'],  "💰")
+        self.card_today  = StatCard("Today's Spending", "—", T['danger'],  "📉")
+        self.card_month  = StatCard("This Month",       "—", T['warning'], "📅")
+        self.card_net    = StatCard("Net Profit",        "—", T['success'], "📈")
         for c in [self.card_budget, self.card_today, self.card_month, self.card_net]:
-            cards_row.addWidget(c)
-        layout.addLayout(cards_row)
+            cards.addWidget(c)
+        root.addLayout(cards)
 
-        # ── Category breakdown ─────────────────────────────────────────────────
-        breakdown_card = QFrame()
-        breakdown_card.setObjectName("card")
-        bc_layout = QVBoxLayout(breakdown_card)
-        bc_layout.setContentsMargins(14, 12, 14, 12)
-        bc_layout.setSpacing(8)
+        # Splitter: categories on left, expenses on right
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(1)
 
-        bc_hdr = QHBoxLayout()
-        bc_hdr.addWidget(QLabel("📊  This Month by Category"))
-        bc_hdr.addStretch()
-        bc_layout.addLayout(bc_hdr)
-        bc_layout.addWidget(Divider())
+        # ── Left: Category panel ───────────────────────────────────────────────
+        left = QFrame()
+        left.setObjectName("card")
+        left.setMinimumWidth(210)
+        left.setMaximumWidth(270)
+        left_l = QVBoxLayout(left)
+        left_l.setContentsMargins(12, 12, 12, 12)
+        left_l.setSpacing(6)
 
-        self.category_bar_widget = QWidget()
-        self.category_bar_layout = QVBoxLayout(self.category_bar_widget)
-        self.category_bar_layout.setContentsMargins(0, 0, 0, 0)
-        self.category_bar_layout.setSpacing(6)
-        bc_layout.addWidget(self.category_bar_widget)
-        layout.addWidget(breakdown_card)
+        cat_hdr = QHBoxLayout()
+        cat_title = QLabel("Categories")
+        cat_title.setStyleSheet("font-weight: 700; font-size: 13px;")
+        cat_hdr.addWidget(cat_title)
+        cat_hdr.addStretch()
+        new_cat_btn = QPushButton("＋")
+        new_cat_btn.setObjectName("ghost")
+        new_cat_btn.setFixedSize(50, 35)
+        new_cat_btn.setToolTip("Add new category")
+        new_cat_btn.clicked.connect(self._add_category)
+        cat_hdr.addWidget(new_cat_btn)
+        left_l.addLayout(cat_hdr)
+        left_l.addWidget(Divider())
 
-        # ── Expense list ───────────────────────────────────────────────────────
-        list_card = QFrame()
-        list_card.setObjectName("card")
-        lc = QVBoxLayout(list_card)
-        lc.setContentsMargins(14, 12, 14, 12)
-        lc.setSpacing(8)
+        cat_scroll = QScrollArea()
+        cat_scroll.setWidgetResizable(True)
+        cat_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        cat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._cat_container = QWidget()
+        self._cat_layout = QVBoxLayout(self._cat_container)
+        self._cat_layout.setContentsMargins(0, 0, 0, 0)
+        self._cat_layout.setSpacing(4)
+        self._cat_layout.addStretch()
+        cat_scroll.setWidget(self._cat_container)
+        left_l.addWidget(cat_scroll)
+        splitter.addWidget(left)
 
-        # Filter row
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(8)
-        filter_row.addWidget(QLabel("From:"))
+        # ── Right: Expenses list ───────────────────────────────────────────────
+        right = QFrame()
+        right.setObjectName("card")
+        right_l = QVBoxLayout(right)
+        right_l.setContentsMargins(14, 14, 14, 14)
+        right_l.setSpacing(8)
+
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(8)
+        filter_bar.addWidget(QLabel("From:"))
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
         self.date_from.setDate(QDate.currentDate().addDays(-30))
         self.date_from.setFixedHeight(32)
-        filter_row.addWidget(self.date_from)
-
-        filter_row.addWidget(QLabel("To:"))
+        filter_bar.addWidget(self.date_from)
+        filter_bar.addWidget(QLabel("To:"))
         self.date_to = QDateEdit()
         self.date_to.setCalendarPopup(True)
         self.date_to.setDate(QDate.currentDate())
         self.date_to.setFixedHeight(32)
-        filter_row.addWidget(self.date_to)
-
-        filter_row.addWidget(QLabel("Category:"))
+        filter_bar.addWidget(self.date_to)
+        filter_bar.addWidget(QLabel("Category:"))
         self.cat_filter = QComboBox()
         self.cat_filter.setFixedHeight(32)
+        self.cat_filter.setMinimumWidth(130)
         self.cat_filter.addItem("All Categories", None)
-        filter_row.addWidget(self.cat_filter)
-
-        filter_row.addWidget(QLabel("Type:"))
-        self.type_filter = QComboBox()
-        self.type_filter.setFixedHeight(32)
-        self.type_filter.addItems(["All", "Expense", "Budget Add", "Budget Sub"])
-        filter_row.addWidget(self.type_filter)
-
-        go_btn = QPushButton("Filter")
-        go_btn.setObjectName("primary")
+        filter_bar.addWidget(self.cat_filter)
+        go_btn = QPushButton("Apply")
+        go_btn.setObjectName("ghost")
         go_btn.setFixedHeight(32)
         go_btn.clicked.connect(self._load_table)
-        filter_row.addWidget(go_btn)
-        filter_row.addStretch()
-        lc.addLayout(filter_row)
+        filter_bar.addWidget(go_btn)
+        filter_bar.addStretch()
+        right_l.addLayout(filter_bar)
 
         self.summary_lbl = QLabel()
         self.summary_lbl.setStyleSheet(f"color: {T['text_muted']}; font-size: 12px;")
-        lc.addWidget(self.summary_lbl)
-        lc.addWidget(Divider())
+        right_l.addWidget(self.summary_lbl)
+        right_l.addWidget(Divider())
 
-        # Table: Date | Type | Category | Title | Amount | Note | Actions
+        # Table: Date | Category | Description | Amount | Note | Delete
         self.exp_table = styled_table(
-            ["Date", "Type", "Category", "Title", "Amount", "Note", ""],
-            col_widths=[120, 100, 120, None, 100, 140, 60],
-            stretch_col=3
+            ["Date", "Category", "Description", "Amount", "Note", ""],
+            col_widths=[150, 150, None, 100, 150, 60],
+            stretch_col=2
         )
         self.exp_table.setMinimumHeight(260)
-        lc.addWidget(self.exp_table)
-        layout.addWidget(list_card)
-        layout.addStretch()
+        right_l.addWidget(self.exp_table)
+        splitter.addWidget(right)
 
-        scroll.setWidget(container)
-        outer.addWidget(scroll)
+        splitter.setSizes([240, 700])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        root.addWidget(splitter)
 
     # ── Refresh ────────────────────────────────────────────────────────────────
     def refresh(self):
         T = _T()
         stats = ExpenseQueries.dashboard_stats()
 
-        self.card_budget.set_value(format_currency(stats['budget']))
-        # Budget card color: green if positive, red if negative
-        budget_color = T['success'] if stats['budget'] >= 0 else T['danger']
-        self.card_budget.set_accent(budget_color)
-
+        budget = stats['budget']
+        self.card_budget.set_value(format_currency(budget))
+        self.card_budget.set_accent(T['success'] if budget >= 0 else T['danger'])
         self.card_today.set_value(format_currency(stats['today_exp']))
         self.card_month.set_value(format_currency(stats['month_exp']))
 
-        # Net = this month's sales - this month's expenses (query separately)
         from database.connection import get_db
         conn = get_db()
         try:
@@ -400,147 +449,148 @@ class ExpensesTab(QWidget):
         finally:
             conn.close()
         net = month_sales - stats['month_exp']
-        net_color = T['success'] if net >= 0 else T['danger']
         self.card_net.set_value(format_currency(net))
-        self.card_net.set_accent(net_color)
+        self.card_net.set_accent(T['success'] if net >= 0 else T['danger'])
 
-        # ── Category breakdown bars ────────────────────────────────────────────
-        while self.category_bar_layout.count():
-            item = self.category_bar_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self._rebuild_cat_panel(stats)
 
-        by_cat = stats.get('by_cat', [])
-        max_amt = max((c['total'] for c in by_cat if c['total'] > 0), default=1)
-
-        for cat in by_cat:
-            if cat['total'] <= 0:
-                continue
-            row_w = QWidget()
-            row_l = QHBoxLayout(row_w)
-            row_l.setContentsMargins(0, 0, 0, 0)
-            row_l.setSpacing(8)
-
-            icon_name = QLabel(f"{cat['icon']}  {cat['name']}")
-            icon_name.setFixedWidth(130)
-            icon_name.setStyleSheet(f"font-size: 12px; color: {T['text']};")
-            row_l.addWidget(icon_name)
-
-            # Progress bar
-            bar_bg = QFrame()
-            bar_bg.setFixedHeight(16)
-            bar_bg.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            bar_bg.setStyleSheet(
-                f"QFrame {{ background: {T['surface2']}; border-radius: 8px; }}")
-            bar_bg_layout = QHBoxLayout(bar_bg)
-            bar_bg_layout.setContentsMargins(0, 0, 0, 0)
-            bar_bg_layout.setSpacing(0)
-
-            pct = cat['total'] / max_amt
-            bar_fill = QFrame()
-            bar_fill.setFixedHeight(16)
-            bar_fill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            bar_fill.setFixedWidth(max(8, int(pct * 280)))
-            bar_fill.setStyleSheet(
-                f"QFrame {{ background: {cat['color']}; border-radius: 8px; }}")
-            bar_bg_layout.addWidget(bar_fill)
-            bar_bg_layout.addStretch()
-            row_l.addWidget(bar_bg, 1)
-
-            amt_lbl = QLabel(format_currency(cat['total']))
-            amt_lbl.setFixedWidth(90)
-            amt_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            amt_lbl.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {cat['color']};")
-            row_l.addWidget(amt_lbl)
-            self.category_bar_layout.addWidget(row_w)
-
-        if not any(c['total'] > 0 for c in by_cat):
-            no_data = QLabel("No expenses this month.")
-            no_data.setStyleSheet(f"color: {T['text_muted']}; font-size: 12px; padding: 8px;")
-            self.category_bar_layout.addWidget(no_data)
-
-        # ── Refresh category filter combo ──────────────────────────────────────
-        current_cat = self.cat_filter.currentData()
+        current = self.cat_filter.currentData()
         self.cat_filter.clear()
         self.cat_filter.addItem("All Categories", None)
         for c in ExpenseQueries.get_categories():
             self.cat_filter.addItem(f"{c['icon']}  {c['name']}", c['id'])
-        if current_cat:
-            idx = self.cat_filter.findData(current_cat)
+        if current:
+            idx = self.cat_filter.findData(current)
             if idx >= 0:
                 self.cat_filter.setCurrentIndex(idx)
 
         self._load_table()
 
+    def _rebuild_cat_panel(self, stats):
+        T = _T()
+        by_cat  = {c['name']: c for c in stats.get('by_cat', [])}
+        cats    = list(ExpenseQueries.get_categories())
+        max_amt = max((c['total'] for c in stats.get('by_cat', []) if c['total'] > 0), default=1)
+
+        # Remove all but the trailing stretch
+        while self._cat_layout.count() > 1:
+            item = self._cat_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not cats:
+            empty = QLabel("No categories.\nClick ＋ to add one.")
+            empty.setStyleSheet(f"color: {T['text_muted']}; font-size: 11px; padding: 8px;")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._cat_layout.insertWidget(0, empty)
+            return
+
+        for cat in cats:
+            spent = by_cat.get(cat['name'], {}).get('total', 0.0)
+            color = cat['color']
+
+            card = QFrame()
+            card.setStyleSheet(
+                f"QFrame {{ border-radius: 8px; background: {T['surface2']}; border: none; }}"
+                f"QFrame:hover {{ background: {T['surface3']}; }}")
+            card_l = QVBoxLayout(card)
+            card_l.setContentsMargins(10, 8, 10, 6)
+            card_l.setSpacing(4)
+
+            # Icon + name + amount
+            top = QHBoxLayout()
+            icon_name = QLabel(f"{cat['icon']}  {cat['name']}")
+            icon_name.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {T['text']};"
+                f" background: transparent; border: none;")
+            top.addWidget(icon_name)
+            top.addStretch()
+            amt = QLabel(format_currency(spent))
+            amt.setStyleSheet(
+                f"font-size: 11px; font-weight: 700; color: {color};"
+                f" background: transparent; border: none;")
+            top.addWidget(amt)
+            card_l.addLayout(top)
+
+            # Progress bar (this month's spending)
+            pct = min(1.0, spent / max_amt) if spent > 0 else 0
+            bar_bg = QFrame()
+            bar_bg.setFixedHeight(4)
+            bar_bg.setStyleSheet(
+                f"QFrame {{ background: {T['surface']}; border-radius: 2px; border: none; }}")
+            bar_bg_l = QHBoxLayout(bar_bg)
+            bar_bg_l.setContentsMargins(0, 0, 0, 0)
+            bar_bg_l.setSpacing(0)
+            if pct > 0:
+                fill = QFrame()
+                fill.setFixedHeight(4)
+                fill.setFixedWidth(max(4, int(pct * 170)))
+                fill.setStyleSheet(
+                    f"QFrame {{ background: {color}; border-radius: 2px; border: none; }}")
+                bar_bg_l.addWidget(fill)
+            bar_bg_l.addStretch()
+            card_l.addWidget(bar_bg)
+
+            # Edit / Delete buttons
+            btn_row = QHBoxLayout()
+            btn_row.setSpacing(4)
+            btn_row.addStretch()
+            edit_btn = QPushButton("Edit")
+            edit_btn.setObjectName("ghost")
+            edit_btn.setFixedHeight(22)
+            edit_btn.setFixedWidth(44)
+            edit_btn.setStyleSheet("font-size: 10px; padding: 0 4px;")
+            edit_btn.clicked.connect(lambda _, c=dict(cat): self._edit_category(c))
+            del_btn = QPushButton("Del")
+            del_btn.setObjectName("danger")
+            del_btn.setFixedHeight(22)
+            del_btn.setFixedWidth(36)
+            del_btn.setStyleSheet("font-size: 10px; padding: 0 4px;")
+            del_btn.clicked.connect(lambda _, cid=cat['id']: self._delete_category(cid))
+            btn_row.addWidget(edit_btn)
+            btn_row.addWidget(del_btn)
+            card_l.addLayout(btn_row)
+
+            self._cat_layout.insertWidget(self._cat_layout.count() - 1, card)
+
     def _load_table(self):
         T = _T()
         RIGHT  = Qt.AlignmentFlag.AlignRight  | Qt.AlignmentFlag.AlignVCenter
-        CENTER = Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
 
-        date_from   = self.date_from.date().toString("yyyy-MM-dd")
-        date_to     = self.date_to.date().toString("yyyy-MM-dd")
-        cat_id      = self.cat_filter.currentData()
-        type_filter = self.type_filter.currentText()
+        date_from = self.date_from.date().toString("yyyy-MM-dd")
+        date_to   = self.date_to.date().toString("yyyy-MM-dd")
+        cat_id    = self.cat_filter.currentData()
 
-        type_map = {
-            "Expense":    "expense",
-            "Budget Add": "budget_add",
-            "Budget Sub": "budget_sub",
-        }
-        filter_type = type_map.get(type_filter)
+        rows = [r for r in ExpenseQueries.get_all(date_from, date_to, cat_id)
+                if r['type'] == 'expense']
 
-        rows = ExpenseQueries.get_all(date_from, date_to, cat_id)
-        if filter_type:
-            rows = [r for r in rows if r['type'] == filter_type]
-
-        self._table_rows = list(rows)
         self.exp_table.setRowCount(0)
         self.exp_table.setRowCount(len(rows))
-
-        type_labels = {
-            'expense':    ('💸 Expense',    T['danger']),
-            'budget_add': ('➕ Add Budget', T['success']),
-            'budget_sub': ('➖ Sub Budget', T['warning']),
-        }
-        total_expense = sum(r['amount'] for r in rows if r['type'] == 'expense')
-        total_added   = sum(r['amount'] for r in rows if r['type'] == 'budget_add')
+        total = sum(r['amount'] for r in rows)
 
         for i, r in enumerate(rows):
-            date_item = QTableWidgetItem(short_date(r['created_at']))
-            self.exp_table.setItem(i, 0, date_item)
+            self.exp_table.setItem(i, 0, QTableWidgetItem(short_date(r['created_at'])))
+            cat_txt = f"{r['cat_icon']}  {r['cat_name']}" if r['cat_name'] else '—'
+            self.exp_table.setItem(i, 1, QTableWidgetItem(cat_txt))
+            self.exp_table.setItem(i, 2, QTableWidgetItem(r['title']))
+            self.exp_table.setItem(i, 3, make_table_item(
+                format_currency(r['amount']), RIGHT, T['danger']))
+            self.exp_table.setItem(i, 4, QTableWidgetItem(r['note'] or '—'))
 
-            type_lbl, type_color = type_labels.get(r['type'], (r['type'], T['text']))
-            self.exp_table.setItem(i, 1, make_table_item(type_lbl, CENTER, type_color))
-
-            cat_text = f"{r['cat_icon']}  {r['cat_name']}" if r['cat_name'] else '—'
-            self.exp_table.setItem(i, 2, QTableWidgetItem(cat_text))
-
-            self.exp_table.setItem(i, 3, QTableWidgetItem(r['title']))
-
-            amt_color = T['danger'] if r['type'] == 'expense' else T['success']
-            prefix = '-' if r['type'] in ('expense', 'budget_sub') else '+'
-            self.exp_table.setItem(i, 4, make_table_item(
-                f"{prefix}{format_currency(r['amount'])}", RIGHT, amt_color))
-
-            self.exp_table.setItem(i, 5, QTableWidgetItem(r['note'] or '—'))
-
-            # Delete button
             del_btn = QPushButton("🗑")
-            del_btn.setFixedSize(32, 26)
+            del_btn.setFixedSize(40, 40)
             del_btn.setObjectName("danger")
-            del_btn.setToolTip("Delete entry (reverses budget effect)")
-            del_btn.clicked.connect(lambda _, rid=r['id']: self._delete_entry(rid))
-            self.exp_table.setCellWidget(i, 6, del_btn)
+            del_btn.setToolTip("Delete this expense")
+            del_btn.clicked.connect(lambda _, rid=r['id']: self._delete_expense(rid))
+            self.exp_table.setCellWidget(i, 5, del_btn)
 
+        n = len(rows)
         self.summary_lbl.setText(
-            f"Showing {len(rows)} records  ·  "
-            f"Total expenses: {format_currency(total_expense)}  ·  "
-            f"Budget added: {format_currency(total_added)}"
-        )
+            f"{n} expense{'s' if n != 1 else ''}  ·  Total spent: {format_currency(total)}")
 
     # ── Actions ────────────────────────────────────────────────────────────────
-    def _add_entry(self):
-        dlg = AddExpenseDialog(self._user, self)
+    def _add_expense(self):
+        dlg = _AddExpenseDialog(self._user, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             try:
                 ExpenseQueries.create(**dlg.get_data())
@@ -549,136 +599,56 @@ class ExpensesTab(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
-    def _delete_entry(self, expense_id: int):
+    def _add_budget(self):
+        balance = ExpenseQueries.get_budget()
+        dlg = _BudgetDialog(self._user, balance, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            try:
+                ExpenseQueries.create(**dlg.get_data())
+                self.refresh()
+                self.budget_changed.emit()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
+
+    def _delete_expense(self, expense_id):
         if QMessageBox.question(
-            self, "Delete Entry",
-            "Delete this entry?\nThe budget balance will be reversed.",
+            self, "Delete Expense",
+            "Delete this expense?\nThe amount will be refunded to your budget.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             ExpenseQueries.delete(expense_id)
             self.refresh()
             self.budget_changed.emit()
 
-    def _manage_categories(self):
-        dlg = _CategoryManagerDialog(self)
-        dlg.exec()
-        self.refresh()  # reload category filter after managing
-
-
-# ─── Category Manager Dialog ───────────────────────────────────────────────────
-class _CategoryManagerDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Manage Expense Categories")
-        self.setMinimumSize(500, 420)
-        self._build()
-        self._load()
-
-    def _build(self):
-        T = _T()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-
-        hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("<b>Expense Categories</b>"))
-        hdr.addStretch()
-        add_btn = QPushButton("＋  New Category")
-        add_btn.setObjectName("primary")
-        add_btn.setFixedHeight(32)
-        add_btn.clicked.connect(self._add)
-        hdr.addWidget(add_btn)
-        layout.addLayout(hdr)
-
-        self.table = styled_table(
-            ["Icon", "Name", "Color", "Actions"],
-            col_widths=[50, None, 100, 130],
-            stretch_col=1
-        )
-        layout.addWidget(self.table)
-
-        close_btn = QPushButton("Close")
-        close_btn.setObjectName("ghost")
-        close_btn.setFixedHeight(32)
-        close_btn.clicked.connect(self.accept)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
-
-    def _load(self):
-        T = _T()
-        CENTER = Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
-        cats = list(ExpenseQueries.get_categories())
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(cats))
-        for i, c in enumerate(cats):
-            self.table.setItem(i, 0, make_table_item(c['icon'], CENTER))
-            self.table.setItem(i, 1, QTableWidgetItem(c['name']))
-            color_lbl = make_table_item(c['color'], CENTER, c['color'])
-            self.table.setItem(i, 2, color_lbl)
-
-            btn_w = QWidget()
-            btn_l = QHBoxLayout(btn_w)
-            btn_l.setContentsMargins(2, 1, 2, 1)
-            btn_l.setSpacing(4)
-
-            edit_btn = QPushButton("Edit")
-            edit_btn.setObjectName("ghost")
-            edit_btn.setFixedWidth(50)
-            edit_btn.setFixedHeight(30)
-            edit_btn.setStyleSheet("""
-                QPushButton#ghost {
-                    padding: 2px 4px;
-                    font-size: 11px;
-                }
-            """)
-            edit_btn.clicked.connect(lambda _, cat=dict(c): self._edit(cat))
-
-            del_btn = QPushButton("Del")
-            del_btn.setObjectName("danger")
-            del_btn.setFixedWidth(50)
-            del_btn.setFixedHeight(30)
-            del_btn.setStyleSheet("""
-                QPushButton#ghost {
-                    padding: 2px 4px;
-                    font-size: 11px;
-                }
-            """)
-            del_btn.clicked.connect(lambda _, cid=c['id']: self._delete(cid))
-
-            btn_l.addWidget(edit_btn)
-            btn_l.addWidget(del_btn)
-            self.table.setCellWidget(i, 3, btn_w)
-
-    def _add(self):
-        dlg = CategoryDialog(parent=self)
+    def _add_category(self):
+        dlg = _CategoryDialog(parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             d = dlg.get_data()
             try:
                 ExpenseQueries.create_category(d['name'], d['color'], d['icon'])
-                self._load()
+                self.refresh()
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
-    def _edit(self, cat: dict):
-        dlg = CategoryDialog(cat, self)
+    def _edit_category(self, cat):
+        dlg = _CategoryDialog(cat, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             d = dlg.get_data()
             try:
                 ExpenseQueries.update_category(cat['id'], d['name'], d['color'], d['icon'])
-                self._load()
+                self.refresh()
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
-    def _delete(self, cat_id: int):
+    def _delete_category(self, cat_id):
         if QMessageBox.question(
             self, "Delete Category",
-            "Delete this category?\nExpenses in this category will also be removed.",
+            "Delete this category?\nAll expenses in it will also be removed.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             try:
                 ExpenseQueries.delete_category(cat_id)
-                self._load()
+                self.refresh()
+                self.budget_changed.emit()
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))

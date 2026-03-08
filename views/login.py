@@ -61,7 +61,7 @@ class _InputField(QFrame):
 
         if password:
             self._eye_btn = QPushButton("👁")
-            self._eye_btn.setFixedSize(28, 28)
+            self._eye_btn.setFixedSize(45, 35)
             self._eye_btn.setStyleSheet(
                 f"QPushButton {{ background: transparent; border: none; "
                 f"color: {_T()['text_dim']}; font-size: 14px; }}"
